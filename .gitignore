@@ -10,7 +10,7 @@ __pycache__/
 *.so
 
 # EchoNet Raw Data & Heavy Files (Do NOT push to Git)
-data/
+/data/
 *.avi
 *.mp4
 *.tar.gz
