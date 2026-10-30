@@ -20,31 +20,45 @@ def compute_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[s
     
     if len(y_true) != len(y_pred):
         raise ValueError(f"Length mismatch: y_true ({len(y_true)}) != y_pred ({len(y_pred)})")
-    if len(y_true) < 2:
-        raise ValueError("At least 2 samples required to compute clinical metrics.")
+    if len(y_true) == 0:
+        raise ValueError("Cannot compute metrics on empty arrays.")
 
     # 1. Residuals
     diffs = y_pred - y_true
-    
-    # 2. MAE & RMSE
     mae = float(np.mean(np.abs(diffs)))
     rmse = float(np.sqrt(np.mean(diffs ** 2)))
+    mean_bias = float(np.mean(diffs))
 
-    # 3. Pearson Correlation (r) and p-value
+    if len(y_true) == 1:
+        return {
+            "mae": mae,
+            "rmse": rmse,
+            "pearson_r": 0.0,
+            "pearson_p": 1.0,
+            "r2": 0.0,
+            "bland_altman_bias": mean_bias,
+            "bland_altman_upper_loa": mean_bias,
+            "bland_altman_lower_loa": mean_bias,
+            "binary_low_ef_accuracy": float(float(y_true[0] < 50.0) == float(y_pred[0] < 50.0)),
+            "binary_low_ef_sensitivity": 1.0 if (y_true[0] < 50.0 and y_pred[0] < 50.0) else 0.0,
+            "binary_low_ef_specificity": 1.0 if (y_true[0] >= 50.0 and y_pred[0] >= 50.0) else 0.0,
+            "sample_count": 1
+        }
+
+    # 2. Pearson Correlation (r) and p-value
     r, p_val = stats.pearsonr(y_true, y_pred)
     
-    # 4. Coefficient of Determination (R2)
+    # 3. Coefficient of Determination (R2)
     ss_res = np.sum(diffs ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
     r2 = float(1.0 - (ss_res / ss_tot)) if ss_tot > 0 else 0.0
 
-    # 5. Bland-Altman Limits of Agreement
-    mean_bias = float(np.mean(diffs))
+    # 4. Bland-Altman Limits of Agreement
     sd_diff = float(np.std(diffs, ddof=1))
     upper_loa = float(mean_bias + 1.96 * sd_diff)
     lower_loa = float(mean_bias - 1.96 * sd_diff)
 
-    # 6. Binary Classification of Low EF (< 50%)
+    # 5. Binary Classification of Low EF (< 50%)
     true_low = (y_true < 50.0)
     pred_low = (y_pred < 50.0)
     acc_binary = float(np.mean(true_low == pred_low))
