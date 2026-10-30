@@ -1,0 +1,30 @@
+# Virtual Environment
+.venv/
+env/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# EchoNet Raw Data & Heavy Files (Do NOT push to Git)
+data/
+*.avi
+*.mp4
+*.tar.gz
+*.zip
+*.csv
+
+# Checkpoints
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# IDE and Logs
+.vscode/
+.idea/
+*.log
+scratch/
