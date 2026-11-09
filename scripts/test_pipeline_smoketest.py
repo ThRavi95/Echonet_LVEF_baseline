@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data.rasterizer import rasterize_lv_mask
 from src.data.parser import EchoNetParser
 from src.data.dataset import EchoNetVideoDataset
-from src.data.io import load_video
+from src.data.io import load_video_clip, get_video_total_frames
 
 
 def create_synthetic_echo_avi(output_path: str, num_frames: int = 45, size: int = 112):
@@ -82,14 +82,36 @@ def run_pipeline_smoketest():
     })
     df_files.to_csv(f"{test_dir}/FileList.csv", index=False)
 
-    df_tracings = pd.DataFrame({
-        "FileName": ["MOCK_001.avi"] * 12 + ["MOCK_002.avi"] * 12,
-        "X1": x1 * 4,
-        "Y1": y1 * 4,
-        "X2": x2 * 4,
-        "Y2": y2 * 4,
-        "Frame": [10] * 6 + [25] * 6 + [12] * 6 + [27] * 6
-    })
+    # Frame 10 = larger contour (ED, End-Diastole); Frame 25 = smaller contour (ES)
+    # Use distinct x1/y1/x2/y2 so area-based ED/ES assignment is unambiguous.
+    x1_ed = [30, 28, 30, 36, 46, 56]   # wider polygon → larger area → ED
+    y1_ed = [80, 65, 50, 36, 22, 10]
+    x2_ed = [82, 84, 82, 76, 66, 56]
+    y2_ed = [80, 65, 50, 36, 22, 10]
+
+    x1_es = [42, 41, 42, 46, 52, 56]   # narrower polygon → smaller area → ES
+    y1_es = [70, 60, 50, 40, 30, 20]
+    x2_es = [70, 71, 70, 66, 60, 56]
+    y2_es = [70, 60, 50, 40, 30, 20]
+
+    rows_001 = {
+        "FileName": ["MOCK_001.avi"] * 12,
+        "X1": x1_ed + x1_es,
+        "Y1": y1_ed + y1_es,
+        "X2": x2_ed + x2_es,
+        "Y2": y2_ed + y2_es,
+        "Frame": [10] * 6 + [25] * 6,
+    }
+    rows_002 = {
+        "FileName": ["MOCK_002.avi"] * 12,
+        "X1": x1_ed + x1_es,
+        "Y1": y1_ed + y1_es,
+        "X2": x2_ed + x2_es,
+        "Y2": y2_ed + y2_es,
+        "Frame": [12] * 6 + [27] * 6,
+    }
+    import pandas as _pd
+    df_tracings = _pd.concat([_pd.DataFrame(rows_001), _pd.DataFrame(rows_002)], ignore_index=True)
     df_tracings.to_csv(f"{test_dir}/VolumeTracings.csv", index=False)
     print(" -> Mock CSVs generated.")
 
@@ -99,8 +121,9 @@ def run_pipeline_smoketest():
     train_df = parser.get_split("TRAIN")
     assert len(train_df) == 1, f"Expected 1 train item, got {len(train_df)}"
     ed_f, es_f = parser.get_cardiac_phase_frames("MOCK_001.avi")
-    assert ed_f == 10 and es_f == 25, f"Expected frames (10, 25), got ({ed_f}, {es_f})"
-    print(f" -> Parser verified: Found train split and cardiac phases (ED={ed_f}, ES={es_f}).")
+    # Frame 10 uses wider coords → larger LV area → ED; Frame 25 uses narrower → ES
+    assert ed_f == 10 and es_f == 25, f"Expected ED=10, ES=25, got ED={ed_f}, ES={es_f}"
+    print(f" -> Parser verified: cardiac phases ED={ed_f}, ES={es_f} (area-based).")
 
     # 4. Test Dataset and DataLoader
     print("[4/5] Testing PyTorch EchoNetVideoDataset & DataLoader...")
