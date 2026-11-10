@@ -62,6 +62,29 @@ class EchoNetVideoDataset(Dataset):
         self.parser = parser
         self.return_phase_mask = return_phase_mask
 
+        # Defensively resolve video paths (.avi, .AVI, companion .npy) and drop missing files
+        self.df["resolved_video_path"] = self.df["FileName"].apply(self._resolve_path)
+        self.df = self.df[self.df["resolved_video_path"] != ""].reset_index(drop=True)
+
+    def _resolve_path(self, filename: str) -> str:
+        # 1. Exact match (or if filename already has extension)
+        direct_path = os.path.join(self.videos_dir, filename)
+        if os.path.exists(direct_path) or os.path.exists(direct_path.replace(".avi", ".npy")):
+            return direct_path
+
+        # 2. Check lower .avi
+        base_name = os.path.splitext(filename)[0]
+        lower_path = os.path.join(self.videos_dir, f"{base_name}.avi")
+        if os.path.exists(lower_path) or os.path.exists(lower_path.replace(".avi", ".npy")):
+            return lower_path
+
+        # 3. Check upper .AVI
+        upper_path = os.path.join(self.videos_dir, f"{base_name}.AVI")
+        if os.path.exists(upper_path) or os.path.exists(upper_path.replace(".AVI", ".npy")):
+            return upper_path
+
+        return ""
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -187,7 +210,7 @@ class EchoNetVideoDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self.df.iloc[idx]
         filename = str(row["FileName"])
-        video_path = os.path.join(self.videos_dir, filename)
+        video_path = str(row["resolved_video_path"])
 
         # 1. Temporal sampling
         start_frame = self._choose_start_frame(video_path)
@@ -270,13 +293,33 @@ class EchoNetMultiClipDataset(Dataset):
         self.mean = mean
         self.std = std
 
+        # Defensively resolve video paths (.avi, .AVI, companion .npy) and drop missing files
+        self.df["resolved_video_path"] = self.df["FileName"].apply(self._resolve_path)
+        self.df = self.df[self.df["resolved_video_path"] != ""].reset_index(drop=True)
+
+    def _resolve_path(self, filename: str) -> str:
+        direct_path = os.path.join(self.videos_dir, filename)
+        if os.path.exists(direct_path) or os.path.exists(direct_path.replace(".avi", ".npy")):
+            return direct_path
+
+        base_name = os.path.splitext(filename)[0]
+        lower_path = os.path.join(self.videos_dir, f"{base_name}.avi")
+        if os.path.exists(lower_path) or os.path.exists(lower_path.replace(".avi", ".npy")):
+            return lower_path
+
+        upper_path = os.path.join(self.videos_dir, f"{base_name}.AVI")
+        if os.path.exists(upper_path) or os.path.exists(upper_path.replace(".AVI", ".npy")):
+            return upper_path
+
+        return ""
+
     def __len__(self) -> int:
         return len(self.df)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self.df.iloc[idx]
         filename = str(row["FileName"])
-        video_path = os.path.join(self.videos_dir, filename)
+        video_path = str(row["resolved_video_path"])
 
         # (num_clips, T, H, W, 3) float32 normalised
         multi_clip_np = load_multiclip_video(
