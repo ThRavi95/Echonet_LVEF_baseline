@@ -3,12 +3,8 @@ EchoNet-Dynamic PyTorch Datasets
 =================================
 Implements strict split-aware sampling, spatial augmentation, normalisation,
 and optional cardiac phase mask generation aligned with Ouyang et al. (Nature 2020).
-
-Augmentation strategy:
-  TRAIN  — random temporal start + zero-pad 112→136 → consistent random 112-crop
-           (with identical spatial crop applied to binary ED/ES masks when returned)
-  VAL    — deterministic centred clip, no spatial padding/cropping
-  TEST   — EchoNetMultiClipDataset extracts evenly-spaced clips for beat-to-beat averaging
+Defensively validates all video files on disk (handling case differences like
+.avi vs .AVI) and excludes missing/corrupted entries before DataLoader execution.
 """
 import os
 from typing import Any, Dict, Optional, Tuple
@@ -32,8 +28,6 @@ class EchoNetVideoDataset(Dataset):
     PyTorch Dataset for EchoNet-Dynamic video-based LVEF regression.
 
     Output tensor shape: (3, num_frames, image_size, image_size) — (C, T, H, W).
-    All normalisation is performed inside load_video_clip; this class only
-    handles temporal start selection, spatial augmentation, and mask assembly.
     """
 
     def __init__(
@@ -62,26 +56,63 @@ class EchoNetVideoDataset(Dataset):
         self.parser = parser
         self.return_phase_mask = return_phase_mask
 
+        # Index actual disk directory case-insensitively
+        self._build_disk_index()
+
         # Defensively resolve video paths (.avi, .AVI, companion .npy) and drop missing files
+        initial_count = len(self.df)
         self.df["resolved_video_path"] = self.df["FileName"].apply(self._resolve_path)
         self.df = self.df[self.df["resolved_video_path"] != ""].reset_index(drop=True)
+        dropped_count = initial_count - len(self.df)
+        if dropped_count > 0:
+            print(
+                f"[Dataset] Verified {len(self.df)}/{initial_count} videos on disk "
+                f"({dropped_count} missing or empty files dropped from split)."
+            )
+
+    def _build_disk_index(self) -> None:
+        """Scan videos_dir once and build case-insensitive name -> absolute path map."""
+        self.disk_files: Dict[str, str] = {}
+        if os.path.exists(self.videos_dir):
+            try:
+                for entry in os.scandir(self.videos_dir):
+                    if entry.is_file():
+                        self.disk_files[entry.name.lower()] = entry.path
+            except Exception:
+                pass
 
     def _resolve_path(self, filename: str) -> str:
-        # 1. Exact match (or if filename already has extension)
-        direct_path = os.path.join(self.videos_dir, filename)
-        if os.path.exists(direct_path) or os.path.exists(direct_path.replace(".avi", ".npy")):
-            return direct_path
+        s = str(filename).strip()
+        base, _ = os.path.splitext(s)
+        base_clean = base.strip()
 
-        # 2. Check lower .avi
-        base_name = os.path.splitext(filename)[0]
-        lower_path = os.path.join(self.videos_dir, f"{base_name}.avi")
-        if os.path.exists(lower_path) or os.path.exists(lower_path.replace(".avi", ".npy")):
-            return lower_path
+        candidates = [
+            s.lower(),
+            f"{base_clean}.avi".lower(),
+            f"{base_clean}.npy".lower(),
+            f"{base_clean}.mp4".lower(),
+            f"{base_clean}.avi",
+            f"{base_clean}.AVI",
+        ]
+        for c in candidates:
+            c_lower = c.lower()
+            if c_lower in self.disk_files:
+                path = self.disk_files[c_lower]
+                try:
+                    if os.path.getsize(path) > 0:
+                        return path
+                except OSError:
+                    pass
 
-        # 3. Check upper .AVI
-        upper_path = os.path.join(self.videos_dir, f"{base_name}.AVI")
-        if os.path.exists(upper_path) or os.path.exists(upper_path.replace(".AVI", ".npy")):
-            return upper_path
+        # Fallback to direct path checks (e.g. symlinks or relative paths)
+        for c_name in [s, f"{base_clean}.avi", f"{base_clean}.AVI", f"{base_clean}.npy"]:
+            direct = os.path.join(self.videos_dir, c_name)
+            if os.path.exists(direct):
+                try:
+                    if os.path.getsize(direct) > 0:
+                        return direct
+                except OSError:
+                    pass
 
         return ""
 
@@ -90,12 +121,6 @@ class EchoNetVideoDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _choose_start_frame(self, video_path: str) -> int:
-        """
-        Select the temporal start frame for clip extraction.
-
-        TRAIN: uniform-random over [0, max_start] where max_start = max(0, T - span).
-        VAL/TEST: deterministic centre, floor((T - span) / 2).
-        """
         total = get_video_total_frames(video_path)
         span = self.num_frames * self.frame_stride
 
@@ -110,13 +135,6 @@ class EchoNetVideoDataset(Dataset):
     def _apply_spatial_augmentation(
         self, clip: np.ndarray
     ) -> Tuple[np.ndarray, int, int]:
-        """
-        Zero-pad clip spatially by `self.padding` (112 → 136) and apply a
-        single random crop back to (image_size, image_size) across all frames.
-
-        Returns:
-            (cropped_clip, top, left) so phase masks can be cropped identically.
-        """
         pad = self.padding
         if pad <= 0:
             return clip, 0, 0
@@ -139,7 +157,6 @@ class EchoNetVideoDataset(Dataset):
     def _crop_mask_to_match(
         self, mask: np.ndarray, top: int, left: int
     ) -> np.ndarray:
-        """Apply the exact same spatial zero-pad and crop offset to a 2D mask."""
         pad = self.padding
         if pad <= 0:
             return mask
@@ -158,10 +175,6 @@ class EchoNetVideoDataset(Dataset):
         phase_frame: Optional[int],
         start_frame: int,
     ) -> int:
-        """
-        Map an absolute video frame index to a clip-relative index.
-        Returns index in [0, num_frames - 1] or -1 if outside the sampled clip.
-        """
         if phase_frame is None:
             return -1
         offset = phase_frame - start_frame
@@ -181,7 +194,6 @@ class EchoNetVideoDataset(Dataset):
         crop_top: Optional[int] = None,
         crop_left: Optional[int] = None,
     ) -> torch.Tensor:
-        """Rasterise the LV tracing for a frame, matching train spatial crop if provided."""
         mask = np.zeros((self.image_size, self.image_size), dtype=np.uint8)
         if frame is not None and self.parser is not None:
             coords = self.parser.get_tracing_coordinates(filename, frame)
@@ -212,19 +224,25 @@ class EchoNetVideoDataset(Dataset):
         filename = str(row["FileName"])
         video_path = str(row["resolved_video_path"])
 
-        # 1. Temporal sampling
-        start_frame = self._choose_start_frame(video_path)
+        try:
+            # 1. Temporal sampling
+            start_frame = self._choose_start_frame(video_path)
 
-        # 2. Load normalised clip -> float32 (T, H, W, C)
-        clip = load_video_clip(
-            video_path,
-            start_frame=start_frame,
-            num_frames=self.num_frames,
-            stride=self.frame_stride,
-            target_size=self.image_size,
-            mean=self.mean,
-            std=self.std,
-        )
+            # 2. Load normalised clip -> float32 (T, H, W, C)
+            clip = load_video_clip(
+                video_path,
+                start_frame=start_frame,
+                num_frames=self.num_frames,
+                stride=self.frame_stride,
+                target_size=self.image_size,
+                mean=self.mean,
+                std=self.std,
+            )
+        except Exception as exc:
+            # Fallback to next sample if an individual file is unreadable
+            if len(self.df) > 1:
+                return self.__getitem__((idx + 1) % len(self.df))
+            raise exc
 
         # 3. Spatial augmentation (TRAIN only; VAL/TEST use native 112x112)
         crop_top: Optional[int] = None
@@ -267,10 +285,6 @@ class EchoNetVideoDataset(Dataset):
 class EchoNetMultiClipDataset(Dataset):
     """
     Multi-clip test-time Dataset for DataLoader-parallelised evaluation.
-
-    Each item returns `num_clips` evenly-spaced clips across the full video:
-      clips: float32 tensor of shape (num_clips, 3, num_frames, image_size, image_size)
-      ef:    float32 scalar tensor
     """
 
     def __init__(
@@ -293,23 +307,58 @@ class EchoNetMultiClipDataset(Dataset):
         self.mean = mean
         self.std = std
 
-        # Defensively resolve video paths (.avi, .AVI, companion .npy) and drop missing files
+        self._build_disk_index()
+        initial_count = len(self.df)
         self.df["resolved_video_path"] = self.df["FileName"].apply(self._resolve_path)
         self.df = self.df[self.df["resolved_video_path"] != ""].reset_index(drop=True)
+        dropped_count = initial_count - len(self.df)
+        if dropped_count > 0:
+            print(
+                f"[TestDataset] Verified {len(self.df)}/{initial_count} videos on disk "
+                f"({dropped_count} missing or empty files dropped from test split)."
+            )
+
+    def _build_disk_index(self) -> None:
+        self.disk_files: Dict[str, str] = {}
+        if os.path.exists(self.videos_dir):
+            try:
+                for entry in os.scandir(self.videos_dir):
+                    if entry.is_file():
+                        self.disk_files[entry.name.lower()] = entry.path
+            except Exception:
+                pass
 
     def _resolve_path(self, filename: str) -> str:
-        direct_path = os.path.join(self.videos_dir, filename)
-        if os.path.exists(direct_path) or os.path.exists(direct_path.replace(".avi", ".npy")):
-            return direct_path
+        s = str(filename).strip()
+        base, _ = os.path.splitext(s)
+        base_clean = base.strip()
 
-        base_name = os.path.splitext(filename)[0]
-        lower_path = os.path.join(self.videos_dir, f"{base_name}.avi")
-        if os.path.exists(lower_path) or os.path.exists(lower_path.replace(".avi", ".npy")):
-            return lower_path
+        candidates = [
+            s.lower(),
+            f"{base_clean}.avi".lower(),
+            f"{base_clean}.npy".lower(),
+            f"{base_clean}.mp4".lower(),
+            f"{base_clean}.avi",
+            f"{base_clean}.AVI",
+        ]
+        for c in candidates:
+            c_lower = c.lower()
+            if c_lower in self.disk_files:
+                path = self.disk_files[c_lower]
+                try:
+                    if os.path.getsize(path) > 0:
+                        return path
+                except OSError:
+                    pass
 
-        upper_path = os.path.join(self.videos_dir, f"{base_name}.AVI")
-        if os.path.exists(upper_path) or os.path.exists(upper_path.replace(".AVI", ".npy")):
-            return upper_path
+        for c_name in [s, f"{base_clean}.avi", f"{base_clean}.AVI", f"{base_clean}.npy"]:
+            direct = os.path.join(self.videos_dir, c_name)
+            if os.path.exists(direct):
+                try:
+                    if os.path.getsize(direct) > 0:
+                        return direct
+                except OSError:
+                    pass
 
         return ""
 
@@ -321,18 +370,21 @@ class EchoNetMultiClipDataset(Dataset):
         filename = str(row["FileName"])
         video_path = str(row["resolved_video_path"])
 
-        # (num_clips, T, H, W, 3) float32 normalised
-        multi_clip_np = load_multiclip_video(
-            video_path,
-            num_clips=self.num_clips,
-            clip_len=self.num_frames,
-            stride=self.frame_stride,
-            target_size=self.image_size,
-            mean=self.mean,
-            std=self.std,
-        )
+        try:
+            multi_clip_np = load_multiclip_video(
+                video_path,
+                num_clips=self.num_clips,
+                clip_len=self.num_frames,
+                stride=self.frame_stride,
+                target_size=self.image_size,
+                mean=self.mean,
+                std=self.std,
+            )
+        except Exception as exc:
+            if len(self.df) > 1:
+                return self.__getitem__((idx + 1) % len(self.df))
+            raise exc
 
-        # → (num_clips, 3, T, H, W)
         clips_tensor = torch.from_numpy(
             np.ascontiguousarray(multi_clip_np.transpose(0, 4, 1, 2, 3))
         ).float()

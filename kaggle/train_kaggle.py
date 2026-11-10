@@ -239,8 +239,6 @@ def main() -> None:
         f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}"
     )
 
-    effective_bs = min(args.batch_size, max(1, len(train_df)))
-
     # 3. Build Datasets and DataLoaders using VideoConfig constants
     shared_kw = dict(
         num_frames=vid_cfg.num_frames,
@@ -267,6 +265,14 @@ def main() -> None:
         mean=vid_cfg.mean,
         std=vid_cfg.std,
     )
+
+    if len(train_ds) == 0:
+        raise FileNotFoundError(
+            f"0 valid video files found in {videos_dir} matching FileList.csv. "
+            "Please check that the Videos folder is populated and attached."
+        )
+
+    effective_bs = min(args.batch_size, len(train_ds))
 
     loader_kw = dict(
         num_workers=args.num_workers,
