@@ -52,6 +52,11 @@ class EchoNetR2Plus1D(nn.Module):
         out = self.backbone(x)
         return out.squeeze(-1)
 
+    @property
+    def layer4(self) -> nn.Module:
+        """Convenience property exposing the backbone's layer4."""
+        return self.backbone.layer4
+
     def get_last_conv_layer(self) -> nn.Module:
         """
         Returns the final convolutional block of layer4.

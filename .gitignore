@@ -28,3 +28,7 @@ checkpoints/
 .idea/
 *.log
 scratch/
+
+# Project reference documents
+*.docx
+*.pptx

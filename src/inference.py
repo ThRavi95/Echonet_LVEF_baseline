@@ -1,17 +1,22 @@
 """
-EchoNet-Dynamic LVEF Inference Pipeline
-=========================================
-Provides deterministic multi-clip inference from a trained R(2+1)D-18 checkpoint.
-No synthetic fallbacks.  A FileNotFoundError is raised if the checkpoint is absent.
+EchoNet-Dynamic LVEF Inference & Explainability Pipeline
+========================================================
+Provides deterministic multi-clip inference, 3D Grad-CAM spatiotemporal
+explainability, and automated clinical diagnostic report generation
+from a trained R(2+1)D-18 checkpoint.
+
+No synthetic fallbacks. A FileNotFoundError is raised if the checkpoint is absent.
 """
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
 
+from src.clinical.report import ClinicalReportGenerator
 from src.config import VideoConfig
-from src.data.io import load_multiclip_video
+from src.data.io import load_multiclip_video, load_video_clip
+from src.metrics.explainability import GradCAM3D
 from src.models.r2plus1d import EchoNetR2Plus1D
 
 
@@ -19,7 +24,8 @@ class LVEFEstimator:
     """
     Inference wrapper for the trained R(2+1)D-18 LVEF regression model.
 
-    Uses multi-clip averaging (4 evenly-spaced clips) for robust prediction.
+    Uses multi-clip averaging (4 evenly-spaced clips) for robust prediction,
+    and 3D Grad-CAM for spatiotemporal attention attribution.
 
     Args:
         checkpoint_path: Path to the trained .pt checkpoint file.
@@ -32,7 +38,7 @@ class LVEFEstimator:
     def __init__(
         self,
         checkpoint_path: str,
-        device: str = None,
+        device: Optional[str] = None,
         num_clips: int = 4,
     ):
         if not checkpoint_path or not os.path.exists(checkpoint_path):
@@ -52,14 +58,22 @@ class LVEFEstimator:
         )
         self.cfg = VideoConfig()
         self.num_clips = num_clips
+        self.report_generator = ClinicalReportGenerator()
 
         self.model = EchoNetR2Plus1D(pretrained=False, dropout_rate=0.0)
         ckpt = torch.load(checkpoint_path, map_location=self.device)
         state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
-        self.model.load_state_dict(state)
+
+        # Strip DataParallel module prefixes if present
+        clean_state = {
+            (k[7:] if k.startswith("module.") else k): v
+            for k, v in state.items()
+        }
+
+        self.model.load_state_dict(clean_state)
         self.model.to(self.device)
         self.model.eval()
-        print(f"[LVEFEstimator] Checkpoint loaded: {checkpoint_path}")
+        print(f"[LVEFEstimator] Checkpoint loaded successfully: {checkpoint_path}")
 
     @torch.no_grad()
     def predict(self, video_path: str) -> Dict[str, Any]:
@@ -71,7 +85,7 @@ class LVEFEstimator:
 
         Returns:
             Dict with keys: predicted_lvef, raw_output, clinical_category,
-            badge_color, ase_classification, summary.
+            badge_color, ase_classification, summary, report.
         """
         if not os.path.exists(video_path) and not os.path.exists(
             video_path.replace(".avi", ".npy")
@@ -89,70 +103,69 @@ class LVEFEstimator:
             std=self.cfg.std,
         )
 
-        # → (num_clips, 3, T, H, W)
+        # -> (num_clips, 3, T, H, W)
         clips_tensor = torch.from_numpy(
             np.ascontiguousarray(multi_clip.transpose(0, 4, 1, 2, 3))
         ).float().to(self.device)
 
         preds = self.model(clips_tensor)        # (num_clips,)
         raw_pred = float(preds.mean().item())
-        # Clamp to physiologically plausible range
         clamped_ef = float(np.clip(raw_pred, 10.0, 85.0))
 
-        report = self._clinical_report(clamped_ef)
+        report_dict = self.report_generator.generate_report(
+            patient_id=os.path.basename(video_path),
+            predicted_ef=clamped_ef,
+        )
+
+        classification = report_dict["classification"]
         return {
             "predicted_lvef":     round(clamped_ef, 1),
             "raw_output":         round(raw_pred, 2),
-            "clinical_category":  report["category"],
-            "badge_color":        report["badge_color"],
-            "ase_classification": report["ase_classification"],
-            "summary":            report["summary"],
+            "clinical_category":  classification["phenotype"],
+            "badge_color":        classification["badge_color"],
+            "ase_classification": classification["category"],
+            "summary":            report_dict["narrative"],
+            "report":             report_dict,
         }
 
-    @staticmethod
-    def _clinical_report(ef: float) -> Dict[str, str]:
-        """Translate LVEF into ASE guideline-based clinical classification."""
-        if ef >= 52.0:
-            return {
-                "category": "Normal / Preserved EF (HFpEF)",
-                "badge_color": "#10b981",
-                "ase_classification": "Normal LV Systolic Function",
-                "summary": (
-                    f"Estimated LVEF {ef:.1f}% — normal global LV systolic function. "
-                    "Myocardial contractility and endocardial excursion are preserved "
-                    "across the full cardiac cycle."
-                ),
-            }
-        elif ef >= 41.0:
-            return {
-                "category": "Mildly Reduced EF (HFmrEF)",
-                "badge_color": "#f59e0b",
-                "ase_classification": "Mild LV Systolic Dysfunction",
-                "summary": (
-                    f"Estimated LVEF {ef:.1f}% — mildly reduced systolic capacity. "
-                    "Moderate attenuation of apical and basal endocardial excursion "
-                    "during systole. Clinical correlation recommended."
-                ),
-            }
-        elif ef >= 30.0:
-            return {
-                "category": "Moderately Reduced EF",
-                "badge_color": "#f97316",
-                "ase_classification": "Moderate LV Systolic Dysfunction",
-                "summary": (
-                    f"Estimated LVEF {ef:.1f}% — moderate systolic impairment. "
-                    "Noticeable hypokinesis and compromised stroke volume. "
-                    "Cardiology evaluation and guideline-directed therapy advised."
-                ),
-            }
-        else:
-            return {
-                "category": "Severely Reduced EF (HFrEF)",
-                "badge_color": "#ef4444",
-                "ase_classification": "Severe LV Systolic Dysfunction",
-                "summary": (
-                    f"Estimated LVEF {ef:.1f}% — severe systolic dysfunction. "
-                    "Diffuse myocardial hypokinesis and markedly reduced fractional "
-                    "shortening. Urgent clinical correlation required."
-                ),
-            }
+    def explain(
+        self,
+        video_path: str,
+        start_frame: int = 0,
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """
+        Generate 3D Grad-CAM spatiotemporal heatmap for a 32-frame clip of the video.
+
+        Args:
+            video_path: Path to video file.
+            start_frame: Starting frame index for the 32-frame clip.
+
+        Returns:
+            Tuple of:
+              - raw_frames: (32, 112, 112, 3) float32 in range [0, 1]
+              - heatmap_3d: (32, 112, 112) float32 normalized in range [0, 1]
+              - predicted_ef: scalar predicted LVEF % for this clip
+        """
+        clip_np = load_video_clip(
+            video_path=video_path,
+            start_frame=start_frame,
+            num_frames=self.cfg.num_frames,
+            stride=self.cfg.frame_stride,
+            target_size=self.cfg.image_size,
+            mean=self.cfg.mean,
+            std=self.cfg.std,
+        )  # (32, 112, 112, 3)
+
+        # Un-normalized display frames in [0, 1]
+        raw_frames = np.clip(clip_np * self.cfg.std + self.cfg.mean, 0.0, 1.0)
+
+        # Tensor for model: (1, 3, 32, 112, 112)
+        video_tensor = torch.from_numpy(clip_np).permute(3, 0, 1, 2).unsqueeze(0).float().to(self.device)
+
+        grad_cam = GradCAM3D(model=self.model, target_layer=self.model.layer4)
+        try:
+            heatmap_3d, pred_ef = grad_cam.generate_heatmap_with_prediction(video_tensor)
+        finally:
+            grad_cam.remove_hooks()
+
+        return raw_frames, heatmap_3d.cpu().numpy(), float(pred_ef)
