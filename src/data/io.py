@@ -24,6 +24,62 @@ _ECHO_STD: float = 0.18
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _ensure_ffmpeg():
+    if "IMAGEIO_FFMPEG_EXE" not in os.environ:
+        local_ffmpeg = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            ".venv", "Scripts", "ffmpeg.exe"
+        )
+        if os.path.exists(local_ffmpeg):
+            os.environ["IMAGEIO_FFMPEG_EXE"] = local_ffmpeg
+
+
+def _imageio_load_clip(
+    video_path: str,
+    start_frame: int,
+    num_frames: int,
+    stride: int,
+    target_size: int,
+    mean: float,
+    std: float,
+) -> np.ndarray:
+    """
+    Decodes video frames using imageio (uses bundled static ffmpeg.exe).
+    Supports MP4, AVI, and MOV seamlessly on Windows ARM64 and Linux.
+    """
+    from PIL import Image
+    import imageio.v3 as iio
+
+    _ensure_ffmpeg()
+    raw = iio.imread(video_path)  # (T, H, W, C) uint8
+    total = len(raw)
+
+    frames_out: list = []
+    last_valid: Optional[np.ndarray] = None
+
+    for i in range(num_frames):
+        raw_idx = start_frame + i * stride
+        if raw_idx < total:
+            frame = raw[raw_idx]
+            if frame.shape[0] != target_size or frame.shape[1] != target_size:
+                frame = np.array(
+                    Image.fromarray(frame).resize(
+                        (target_size, target_size), Image.Resampling.BILINEAR
+                    ),
+                    dtype=np.uint8,
+                )
+            last_valid = frame
+        else:
+            frame = last_valid if last_valid is not None else np.zeros(
+                (target_size, target_size, 3), dtype=np.uint8
+            )
+        frames_out.append(frame)
+
+    clip = np.stack(frames_out, axis=0).astype(np.float32) / 255.0  # [0,1]
+    clip = (clip - mean) / std
+    return clip
+
+
 def _load_npy_clip(
     npy_path: str,
     start_frame: int,
@@ -180,14 +236,9 @@ def load_video_clip(
             "Ensure the video exists on disk or companion .npy is provided."
         )
 
-    if not _HAS_CV2:
-        raise RuntimeError(
-            "OpenCV (cv2) is required for AVI decoding but is not installed.\n"
-            "On Kaggle/Linux: cv2 is available natively.\n"
-            "On local machines: provide a companion .npy file for CPU tests."
-        )
-
-    return _cv2_load_clip(video_path, start_frame, num_frames, stride, target_size, mean, std)
+    if _HAS_CV2:
+        return _cv2_load_clip(video_path, start_frame, num_frames, stride, target_size, mean, std)
+    return _imageio_load_clip(video_path, start_frame, num_frames, stride, target_size, mean, std)
 
 
 def get_video_total_frames(video_path: str) -> int:
@@ -211,13 +262,25 @@ def get_video_total_frames(video_path: str) -> int:
             except Exception:
                 pass
 
-    if not _HAS_CV2 or not os.path.exists(video_path):
+    if not os.path.exists(video_path):
         return 0
 
-    cap = cv2.VideoCapture(video_path)
-    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
-    return max(n, 0)
+    if _HAS_CV2:
+        cap = cv2.VideoCapture(video_path)
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        return max(n, 0)
+    else:
+        _ensure_ffmpeg()
+        try:
+            import imageio.v3 as iio
+            props = iio.improps(video_path)
+            if hasattr(props, "n_images") and props.n_images:
+                return int(props.n_images)
+            raw = iio.imread(video_path)
+            return len(raw)
+        except Exception:
+            return 0
 
 
 def load_multiclip_video(

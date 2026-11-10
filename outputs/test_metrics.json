@@ -1,0 +1,14 @@
+{
+  "mae": 4.07057569708143,
+  "rmse": 5.486449782082457,
+  "pearson_r": 0.8960154390572264,
+  "pearson_p": 0.0,
+  "r2": 0.8012003277874719,
+  "bland_altman_bias": 0.4359246640471938,
+  "bland_altman_upper_loa": 11.159532622206973,
+  "bland_altman_lower_loa": -10.287683294112584,
+  "binary_low_ef_accuracy": 0.9169254658385093,
+  "binary_low_ef_sensitivity": 0.7058823529411765,
+  "binary_low_ef_specificity": 0.977977977977978,
+  "sample_count": 1288
+}
