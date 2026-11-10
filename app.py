@@ -47,6 +47,7 @@ def _find_checkpoint(cli_arg: str = "") -> str:
         return cli_arg
     candidates = [
         os.path.join(REPO_ROOT, "outputs", "best_r2plus1d_lvef.pt"),
+        os.path.join(REPO_ROOT, "best_r2plus1d_lvef.pt"),
         os.path.join(REPO_ROOT, "checkpoints", "best_r2plus1d_lvef.pt"),
     ]
     for path in candidates:
