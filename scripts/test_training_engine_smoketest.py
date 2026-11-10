@@ -10,10 +10,10 @@ from torch.utils.data import DataLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.data.dataset import EchoNetVideoDataset
+from src.data.dataset import EchoNetMultiClipDataset, EchoNetVideoDataset
 from src.data.parser import EchoNetParser
 from src.models.r2plus1d import EchoNetR2Plus1D
-from src.training.engine import BaselineTrainer, evaluate
+from src.training.engine import BaselineTrainer, evaluate, evaluate_multiclip
 from kaggle.train_kaggle import plot_training_curves
 
 
@@ -76,7 +76,7 @@ def run_training_smoketest():
 
         train_ds = EchoNetVideoDataset(train_df, f"{test_dir}/Videos", num_frames=32, is_train=True)
         val_ds = EchoNetVideoDataset(val_df, f"{test_dir}/Videos", num_frames=32, is_train=False)
-        test_ds = EchoNetVideoDataset(test_df, f"{test_dir}/Videos", num_frames=32, is_train=False)
+        test_ds = EchoNetMultiClipDataset(test_df, f"{test_dir}/Videos", num_clips=2, num_frames=32)
 
         train_loader = DataLoader(train_ds, batch_size=2, shuffle=True)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
@@ -103,26 +103,33 @@ def run_training_smoketest():
             use_amp=False
         )
 
-        # 4. Train for 1 epoch smoke test
-        print("[4/5] Executing 1 training epoch smoke test...")
+        # 4. Train for 1 epoch + verify last_checkpoint.pt + resume to epoch 2
+        print("[4/5] Executing 1 training epoch + resume smoke test...")
         results = trainer.train(max_epochs=1)
 
         best_ckpt = results["best_checkpoint"]
+        last_ckpt = results["last_checkpoint"]
         assert os.path.exists(best_ckpt), f"Best checkpoint not found at: {best_ckpt}"
-        print(f" -> Checkpoint verified at: {best_ckpt}")
+        assert os.path.exists(last_ckpt), f"Last checkpoint not found at: {last_ckpt}"
+        print(f" -> Best & Last checkpoints verified at: {output_dir}")
 
-        plot_training_curves(results["history"], f"{output_dir}/curves.png")
+        resumed = trainer.train(max_epochs=2, resume=True)
+        assert len(resumed["history"]) == 2, f"Expected 2 history entries after resume, got {len(resumed['history'])}"
+        print(" -> Resume from last_checkpoint.pt verified (epoch 1 -> epoch 2)!")
+
+        plot_training_curves(resumed["history"], f"{output_dir}/curves.png")
         assert os.path.exists(f"{output_dir}/curves.png"), "Training curves figure not created"
         print(" -> Training curves plotted and verified!")
 
-        # 5. Evaluate on test set
-        print("[5/5] Evaluating checkpoint on test set...")
-        ckpt = torch.load(best_ckpt, map_location=device)
+        # 5. Multi-clip evaluate on test set
+        print("[5/5] Evaluating checkpoint on test set with evaluate_multiclip...")
+        ckpt = torch.load(best_ckpt, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
-        test_loss, test_metrics, y_true, y_pred = evaluate(model, test_loader, criterion, device)
+        test_metrics, y_true, y_pred = evaluate_multiclip(model, test_loader, device)
 
-        print(f" -> Test Loss: {test_loss:.4f} | Test MAE: {test_metrics['mae']:.2f}%")
+        print(f" -> Multi-clip Test MAE: {test_metrics['mae']:.2f}%")
         assert test_metrics["mae"] >= 0.0, "MAE must be non-negative"
+        assert len(y_pred) == len(test_df), "Prediction count mismatch"
 
         print("=" * 60)
         print("SUCCESS: TRAINING ENGINE AND KAGGLE PIPELINE VERIFIED!")

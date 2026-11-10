@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.rasterizer import rasterize_lv_mask
 from src.data.parser import EchoNetParser
-from src.data.dataset import EchoNetVideoDataset
+from src.data.dataset import EchoNetMultiClipDataset, EchoNetVideoDataset
 from src.data.io import load_video_clip, get_video_total_frames
 
 
@@ -151,6 +151,21 @@ def run_pipeline_smoketest():
     assert video_tensor.shape == (1, 3, 32, 112, 112), f"Video shape mismatch: {video_tensor.shape}"
     assert torch.isclose(ef_target, torch.tensor([58.5])), "Target EF mismatch"
     assert ed_mask.shape == (1, 112, 112), f"Mask shape mismatch: {ed_mask.shape}"
+
+    # Verify EchoNetMultiClipDataset
+    mc_dataset = EchoNetMultiClipDataset(
+        df=train_df,
+        videos_dir=f"{test_dir}/Videos",
+        num_clips=4,
+        num_frames=32,
+        frame_stride=2,
+        image_size=112,
+    )
+    mc_sample = mc_dataset[0]
+    assert mc_sample["clips"].shape == (4, 3, 32, 112, 112), (
+        f"MultiClip shape mismatch: {mc_sample['clips'].shape}"
+    )
+    print(f" -> MultiClip Tensor Shape: {mc_sample['clips'].shape} (Expected: [4, 3, 32, 112, 112])")
 
     # 5. Clean up temporary test data
     shutil.rmtree(test_dir)

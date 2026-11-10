@@ -2,20 +2,21 @@
 EchoNet-Dynamic R(2+1)D-18 Baseline — Kaggle GPU Training Script
 =================================================================
 Trains the R(2+1)D-18 regression model on the full EchoNet-Dynamic dataset
-(7,465 training videos) and evaluates on the official 1,277-video test set.
+(7,465 training videos) and evaluates on the official 1,277-video test set
+using DataLoader-parallelised multi-clip averaging.
 
 Usage (Kaggle notebook cell):
     !python kaggle/train_kaggle.py \\
         --data_dir /kaggle/input/echonet-dynamic/EchoNet-Dynamic \\
         --output_dir /kaggle/working/outputs \\
         --epochs 25 \\
-        --batch_size 16
+        --batch_size 16 \\
+        --resume
 
 Dataset attachment (Kaggle):
     1. Click '+ Add Input' in the right sidebar.
     2. Search for 'echonet-dynamic'.
-    3. Add the dataset by Kaggle user 'echonet-dynamic' or attach your
-       private copy that contains FileList.csv, VolumeTracings.csv, and Videos/.
+    3. Add the dataset containing FileList.csv, VolumeTracings.csv, and Videos/.
 
 This script will raise FileNotFoundError immediately if the dataset is not
 found — no synthetic fallbacks exist.
@@ -37,16 +38,12 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from src.data.dataset import EchoNetVideoDataset
-from src.data.io import load_multiclip_video
+from src.config import TrainingConfig, VideoConfig
+from src.data.dataset import EchoNetMultiClipDataset, EchoNetVideoDataset
 from src.data.parser import EchoNetParser
-from src.metrics.clinical import (
-    compute_regression_metrics,
-    plot_bland_altman,
-    plot_scatter_correlation,
-)
+from src.metrics.clinical import plot_bland_altman, plot_scatter_correlation
 from src.models.r2plus1d import EchoNetR2Plus1D
-from src.training.engine import BaselineTrainer, evaluate, evaluate_multiclip
+from src.training.engine import BaselineTrainer, evaluate_multiclip
 
 
 # ---------------------------------------------------------------------------
@@ -61,11 +58,6 @@ def find_dataset_components(hint_path: str = "") -> Tuple[str, Optional[str], st
       1. hint_path (--data_dir argument), if provided.
       2. /kaggle/input (recursive scan for Kaggle attached datasets).
       3. ./data/EchoNet-Dynamic and ./data (local fallback).
-
-    Raises:
-        FileNotFoundError: If FileList.csv cannot be found anywhere.
-                           The error message contains explicit instructions on
-                           how to attach the dataset in the Kaggle UI.
     """
     search_roots = []
     if hint_path:
@@ -76,9 +68,9 @@ def find_dataset_components(hint_path: str = "") -> Tuple[str, Optional[str], st
         "./data",
     ])
 
-    file_list_path:    Optional[str] = None
+    file_list_path: Optional[str] = None
     vol_tracings_path: Optional[str] = None
-    videos_dir:        Optional[str] = None
+    videos_dir: Optional[str] = None
 
     for root in search_roots:
         if not os.path.exists(root):
@@ -95,7 +87,6 @@ def find_dataset_components(hint_path: str = "") -> Tuple[str, Optional[str], st
                     videos_dir = os.path.join(dirpath, d)
 
     if file_list_path is None:
-        # Provide actionable diagnostics
         kaggle_contents = ""
         if os.path.exists("/kaggle/input"):
             entries = os.listdir("/kaggle/input")
@@ -121,7 +112,6 @@ def find_dataset_components(hint_path: str = "") -> Tuple[str, Optional[str], st
             + "=" * 65
         )
 
-    # Resolve Videos/ directory if not found by name scan
     if videos_dir is None:
         dataset_folder = os.path.dirname(file_list_path)
         adj_videos = os.path.join(dataset_folder, "Videos")
@@ -146,23 +136,23 @@ def find_dataset_components(hint_path: str = "") -> Tuple[str, Optional[str], st
 
 def plot_training_curves(history: list, output_path: str) -> None:
     """Plot and save training / validation loss and MAE curves."""
-    epochs     = [h["epoch"]      for h in history]
+    epochs = [h["epoch"] for h in history]
     train_loss = [h["train_loss"] for h in history]
-    val_loss   = [h["val_loss"]   for h in history]
-    val_mae    = [h["val_mae"]    for h in history]
+    val_loss = [h["val_loss"] for h in history]
+    val_mae = [h["val_mae"] for h in history]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5), dpi=150)
 
     ax1.plot(epochs, train_loss, "b-o", label="Train Loss (Smooth L1)")
-    ax1.plot(epochs, val_loss,   "r-s", label="Val Loss (Smooth L1)")
+    ax1.plot(epochs, val_loss, "r-s", label="Val Loss (Smooth L1)")
     ax1.set_xlabel("Epoch", fontweight="bold")
-    ax1.set_ylabel("Loss",  fontweight="bold")
+    ax1.set_ylabel("Loss", fontweight="bold")
     ax1.set_title("Training & Validation Loss", pad=8)
     ax1.legend()
     ax1.grid(True, linestyle=":", alpha=0.6)
 
     ax2.plot(epochs, val_mae, "g-^", label="Val MAE (%)")
-    ax2.set_xlabel("Epoch",    fontweight="bold")
+    ax2.set_xlabel("Epoch", fontweight="bold")
     ax2.set_ylabel("MAE (%)", fontweight="bold")
     ax2.set_title("Validation MAE Progression", pad=8)
     ax2.legend()
@@ -179,6 +169,9 @@ def plot_training_curves(history: list, output_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    vid_cfg = VideoConfig()
+    trn_cfg = TrainingConfig()
+
     ap = argparse.ArgumentParser(
         description="EchoNet-Dynamic R(2+1)D-18 LVEF Baseline Training on GPU"
     )
@@ -190,16 +183,17 @@ def main() -> None:
         "--output_dir", type=str,
         default="/kaggle/working/outputs" if os.path.exists("/kaggle/working") else "./outputs",
     )
-    ap.add_argument("--epochs",       type=int,   default=25)
-    ap.add_argument("--batch_size",   type=int,   default=16)
-    ap.add_argument("--lr",           type=float, default=1e-4)
-    ap.add_argument("--weight_decay", type=float, default=1e-2)
-    ap.add_argument("--patience",     type=int,   default=7)
+    ap.add_argument("--epochs", type=int, default=25)
+    ap.add_argument("--batch_size", type=int, default=trn_cfg.batch_size)
+    ap.add_argument("--lr", type=float, default=trn_cfg.learning_rate)
+    ap.add_argument("--weight_decay", type=float, default=trn_cfg.weight_decay)
+    ap.add_argument("--patience", type=int, default=trn_cfg.early_stopping_patience)
+    ap.add_argument("--num_workers", type=int, default=trn_cfg.num_workers)
+    ap.add_argument("--seed", type=int, default=trn_cfg.seed)
     ap.add_argument(
-        "--num_workers", type=int,
-        default=4 if os.name != "nt" else 0,
+        "--resume", action="store_true",
+        help="Resume training from <output_dir>/last_checkpoint.pt if present.",
     )
-    ap.add_argument("--seed",         type=int, default=42)
     ap.add_argument(
         "--skip_training", action="store_true",
         help="Skip training and run final evaluation on an existing checkpoint.",
@@ -227,6 +221,7 @@ def main() -> None:
     print(f"Device:       {device} ({gpu_name})")
     print(f"Output dir:   {args.output_dir}")
     print(f"Epochs:       {args.epochs}  |  Batch size: {args.batch_size}")
+    print(f"Workers:      {args.num_workers} |  Resume: {args.resume}")
     print(f"LR:           {args.lr}      |  Weight decay: {args.weight_decay}")
     print(f"Test clips:   {args.num_test_clips}")
     print("=" * 65)
@@ -237,8 +232,8 @@ def main() -> None:
     # 2. Parse splits (strict patient-level separation via official Split column)
     echo_parser = EchoNetParser(file_list_csv, vol_tracings_csv)
     train_df = echo_parser.get_split("TRAIN")
-    val_df   = echo_parser.get_split("VAL")
-    test_df  = echo_parser.get_split("TEST")
+    val_df = echo_parser.get_split("VAL")
+    test_df = echo_parser.get_split("TEST")
     print(
         f"[Dataset] Split sizes — "
         f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}"
@@ -246,9 +241,15 @@ def main() -> None:
 
     effective_bs = min(args.batch_size, max(1, len(train_df)))
 
-    # 3. Build Datasets and DataLoaders
-    # Shared config: num_frames=32, stride=2, padding=12, mean=0.12, std=0.18
-    shared_kw = dict(num_frames=32, frame_stride=2, padding=12, mean=0.12, std=0.18)
+    # 3. Build Datasets and DataLoaders using VideoConfig constants
+    shared_kw = dict(
+        num_frames=vid_cfg.num_frames,
+        frame_stride=vid_cfg.frame_stride,
+        image_size=vid_cfg.image_size,
+        padding=vid_cfg.padding,
+        mean=vid_cfg.mean,
+        std=vid_cfg.std,
+    )
 
     train_ds = EchoNetVideoDataset(
         df=train_df, videos_dir=videos_dir, is_train=True, **shared_kw
@@ -256,17 +257,26 @@ def main() -> None:
     val_ds = EchoNetVideoDataset(
         df=val_df, videos_dir=videos_dir, is_train=False, **shared_kw
     )
-    test_ds = EchoNetVideoDataset(
-        df=test_df, videos_dir=videos_dir, is_train=False,
-        parser=echo_parser, return_phase_mask=True, **shared_kw
+    test_ds = EchoNetMultiClipDataset(
+        df=test_df,
+        videos_dir=videos_dir,
+        num_clips=args.num_test_clips,
+        num_frames=vid_cfg.num_frames,
+        frame_stride=vid_cfg.frame_stride,
+        image_size=vid_cfg.image_size,
+        mean=vid_cfg.mean,
+        std=vid_cfg.std,
     )
 
     loader_kw = dict(
         num_workers=args.num_workers,
         pin_memory=(device.type == "cuda"),
+        persistent_workers=(args.num_workers > 0),
     )
-    train_loader = DataLoader(train_ds, batch_size=effective_bs, shuffle=True,  **loader_kw)
-    val_loader   = DataLoader(val_ds,   batch_size=effective_bs, shuffle=False, **loader_kw)
+    train_loader = DataLoader(train_ds, batch_size=effective_bs, shuffle=True, **loader_kw)
+    val_loader = DataLoader(val_ds, batch_size=effective_bs, shuffle=False, **loader_kw)
+    test_bs = max(1, effective_bs // max(1, args.num_test_clips))
+    test_loader = DataLoader(test_ds, batch_size=test_bs, shuffle=False, **loader_kw)
 
     # 4. Model: R(2+1)D-18 with Kinetics-400 pre-training
     try:
@@ -276,12 +286,12 @@ def main() -> None:
         print(f"[Model] Pre-trained weights unavailable ({exc}). Using random init.")
         model = EchoNetR2Plus1D(pretrained=False, dropout_rate=0.2).to(device)
 
-    criterion = nn.SmoothL1Loss(beta=1.0)
+    criterion = nn.SmoothL1Loss(beta=trn_cfg.smooth_l1_beta)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=1e-6
+        optimizer, T_max=args.epochs, eta_min=trn_cfg.lr_min
     )
     checkpoint_path = os.path.join(args.output_dir, "best_r2plus1d_lvef.pt")
 
@@ -299,11 +309,12 @@ def main() -> None:
             patience=args.patience,
             use_amp=True,
         )
-        train_result = trainer.train(max_epochs=args.epochs)
-        plot_training_curves(
-            train_result["history"],
-            os.path.join(args.output_dir, "training_curves.png"),
-        )
+        train_result = trainer.train(max_epochs=args.epochs, resume=args.resume)
+        if train_result["history"]:
+            plot_training_curves(
+                train_result["history"],
+                os.path.join(args.output_dir, "training_curves.png"),
+            )
 
     # 6. Load best checkpoint for final test evaluation
     print("\n" + "=" * 65)
@@ -316,54 +327,47 @@ def main() -> None:
             "Run training first (omit --skip_training) or provide a valid .pt file."
         )
 
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
-    print(f"[Eval] Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "
-          f"(val MAE: {ckpt.get('best_val_mae', float('nan')):.2f}%)")
+    print(
+        f"[Eval] Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "
+        f"(val MAE: {ckpt.get('best_val_mae', float('nan')):.2f}%)"
+    )
 
-    # 7. Multi-clip test evaluation (beat-to-beat averaging)
-    test_video_paths = [
-        os.path.join(videos_dir, str(row["FileName"]))
-        for _, row in test_df.iterrows()
-    ]
-    test_true_efs = test_df["EF"].tolist()
-
+    # 7. DataLoader-parallelised multi-clip test evaluation
     test_metrics, y_true, y_pred = evaluate_multiclip(
         model=model,
-        video_paths=test_video_paths,
-        true_efs=test_true_efs,
+        dataloader=test_loader,
         device=device,
-        num_clips=args.num_test_clips,
-        clip_len=32,
-        stride=2,
-        target_size=112,
-        mean=0.12,
-        std=0.18,
     )
 
     print("\n[TEST SET RESULTS]")
     print(f"  MAE:                     {test_metrics['mae']:.2f}%")
     print(f"  RMSE:                    {test_metrics['rmse']:.2f}%")
-    print(f"  Pearson r:               {test_metrics['pearson_r']:.3f} "
-          f"(p={test_metrics['pearson_p']:.2e})")
+    print(
+        f"  Pearson r:               {test_metrics['pearson_r']:.3f} "
+        f"(p={test_metrics['pearson_p']:.2e})"
+    )
     print(f"  R²:                      {test_metrics['r2']:.3f}")
     print(f"  Bland-Altman bias:       {test_metrics['bland_altman_bias']:.2f}%")
-    print(f"  Bland-Altman LoA:        "
-          f"[{test_metrics['bland_altman_lower_loa']:.2f}%, "
-          f"{test_metrics['bland_altman_upper_loa']:.2f}%]")
-    print(f"  Low-EF (<50%) accuracy:  "
-          f"{test_metrics['binary_low_ef_accuracy']*100:.1f}%  "
-          f"Sens: {test_metrics['binary_low_ef_sensitivity']*100:.1f}%  "
-          f"Spec: {test_metrics['binary_low_ef_specificity']*100:.1f}%")
+    print(
+        f"  Bland-Altman LoA:        "
+        f"[{test_metrics['bland_altman_lower_loa']:.2f}%, "
+        f"{test_metrics['bland_altman_upper_loa']:.2f}%]"
+    )
+    print(
+        f"  Low-EF (<50%) accuracy:  "
+        f"{test_metrics['binary_low_ef_accuracy']*100:.1f}%  "
+        f"Sens: {test_metrics['binary_low_ef_sensitivity']*100:.1f}%  "
+        f"Spec: {test_metrics['binary_low_ef_specificity']*100:.1f}%"
+    )
     print(f"  Test sample count:       {test_metrics['sample_count']}")
 
-    # Save metrics JSON for the web UI / audit trail
     metrics_path = os.path.join(args.output_dir, "test_metrics.json")
     with open(metrics_path, "w") as fh:
         json.dump(test_metrics, fh, indent=2)
     print(f"\n[Eval] Metrics saved: {metrics_path}")
 
-    # Diagnostic figures
     plot_scatter_correlation(
         y_true, y_pred,
         save_path=os.path.join(args.output_dir, "test_scatter.png"),
