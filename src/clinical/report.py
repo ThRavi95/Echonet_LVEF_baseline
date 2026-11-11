@@ -36,38 +36,48 @@ class ClinicalReportGenerator:
             category = "Normal LV Systolic Function"
             phenotype = "Preserved Ejection Fraction (HFpEF)"
             severity = "Normal"
+            heart_risk_level = "Low Risk"
             badge_color = "#10b981"  # Emerald green
             urgency = "Routine"
             prognosis = "Favorable systolic performance. Normal myocardial contractility."
+            recommendation = "Standard primary prevention; routine follow-up."
         elif lvef >= 41.0:
             category = "Mild LV Systolic Dysfunction"
             phenotype = "Mildly Reduced Ejection Fraction (HFmrEF)"
             severity = "Mild"
+            heart_risk_level = "Moderate Risk"
             badge_color = "#f59e0b"  # Amber
             urgency = "Elective"
             prognosis = "Mildly impaired global systolic function. Outpatient cardiology correlation recommended."
+            recommendation = "Cardiology evaluation; baseline neurohormonal blockade consideration."
         elif lvef >= 30.0:
             category = "Moderate LV Systolic Dysfunction"
             phenotype = "Moderately Reduced Ejection Fraction"
             severity = "Moderate"
+            heart_risk_level = "High Risk"
             badge_color = "#f97316"  # Orange
             urgency = "Priority"
             prognosis = "Moderate systolic impairment with noticeable reduction in myocardial excursion. Guideline-directed medical therapy indicated."
+            recommendation = "Initiate/titrate 4-pillar GDMT (ARNI/ACEi, Beta-Blocker, MRA, SGLT2i)."
         else:
             category = "Severe LV Systolic Dysfunction"
             phenotype = "Reduced Ejection Fraction (HFrEF)"
             severity = "Severe"
+            heart_risk_level = "Critical Heart Failure Risk"
             badge_color = "#ef4444"  # Crimson red
             urgency = "Urgent"
             prognosis = "Critically depressed left ventricular ejection fraction. High risk of cardiovascular events. Urgent clinical correlation and heart failure specialist consultation required."
+            recommendation = "Immediate heart failure consultation; comprehensive GDMT optimization; evaluate ICD/CRT eligibility."
 
         return {
             "category": category,
             "phenotype": phenotype,
             "severity": severity,
+            "heart_risk_level": heart_risk_level,
             "badge_color": badge_color,
             "urgency": urgency,
             "prognosis": prognosis,
+            "recommendation": recommendation,
         }
 
     @staticmethod

@@ -121,6 +121,7 @@ class LVEFEstimator:
         return {
             "predicted_lvef":     round(clamped_ef, 1),
             "raw_output":         round(raw_pred, 2),
+            "heart_risk_level":   classification.get("heart_risk_level", "Undetermined"),
             "clinical_category":  classification["phenotype"],
             "badge_color":        classification["badge_color"],
             "ase_classification": classification["category"],

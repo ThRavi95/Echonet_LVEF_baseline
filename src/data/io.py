@@ -321,3 +321,43 @@ def load_multiclip_video(
         for sf in start_frames
     ]
     return np.stack(clips, axis=0)  # (num_clips, clip_len, H, W, 3)
+
+
+def list_test_videos(folder: Optional[str] = None) -> list:
+    """
+    Returns a list of unique decodable video filenames in the test videos directory.
+    Supports MP4, AVI, and NPY.
+    """
+    if folder is None:
+        folder = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "data", "test_videos"
+        )
+    if not os.path.exists(folder):
+        return []
+    valid_exts = (".mp4", ".avi", ".npy", ".mov")
+    seen_stems = set()
+    videos = []
+    for f in os.listdir(folder):
+        stem, ext = os.path.splitext(f)
+        if ext.lower() in valid_exts and stem not in seen_stems and not stem.endswith("_deg"):
+            seen_stems.add(stem)
+            videos.append(f)
+    return sorted(videos)
+
+
+def get_random_sample_video(folder: Optional[str] = None) -> Optional[str]:
+    """
+    Returns the absolute path to a randomly selected test video from the pool.
+    """
+    import random
+    videos = list_test_videos(folder)
+    if not videos:
+        return None
+    choice = random.choice(videos)
+    if folder is None:
+        folder = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "data", "test_videos"
+        )
+    return os.path.join(folder, choice)

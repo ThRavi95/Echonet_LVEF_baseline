@@ -1,12 +1,12 @@
 """
-EchoNet-Dynamic Clinical AI Workstation & Explainability Suite
-=============================================================
-Ultra-Modern, Minimalist Diagnostic Interface for:
+EchoNet-Dynamic Clinical AI Workstation
+========================================
+Minimalist, Modern Diagnostic Interface for:
   • Automated Continuous LVEF Estimation (R(2+1)D-18)
-  • 3D Grad-CAM Spatiotemporal Saliency Visualization
-  • Evidence-Based Clinical NLP Diagnostic Reporting (ASE/EACVI Guidelines)
-  • POCUS Ultrasound Degradation Stress Testing
-  • One-Click Patient Sample Loading & Report Export (JSON/Markdown/GIF)
+  • Heart Failure Risk Stratification & Clinical Alerts
+  • Dual Input Modes: Upload Cineloop & Select Random Sample
+  • On-Demand 3D Grad-CAM Explainability Visualization
+  • One-Click Diagnostic Report Export (JSON / TXT / GIF)
 
 Usage:
     python app.py [port] [checkpoint_path]     # default: 8501
@@ -27,15 +27,14 @@ import numpy as np
 from PIL import Image
 
 # ---------------------------------------------------------------------------
-# Path configuration
+# Path setup
 # ---------------------------------------------------------------------------
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from src.clinical.report import ClinicalReportGenerator
-from src.data.degradation import UltrasoundDegradation
-from src.data.io import load_video_clip
+from src.data.io import get_random_sample_video, list_test_videos, load_video_clip
 from src.inference import LVEFEstimator
 
 
@@ -58,25 +57,33 @@ def _find_checkpoint(cli_arg: str = "") -> str:
     )
 
 
-def _load_metrics() -> dict:
-    path = os.path.join(REPO_ROOT, "outputs", "test_metrics.json")
-    if os.path.exists(path):
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+# ---------------------------------------------------------------------------
+# GIF Rendering Helpers
+# ---------------------------------------------------------------------------
+def _render_raw_gif(raw_frames: np.ndarray, duration_ms: int = 55) -> str:
+    pil_frames = [
+        Image.fromarray(np.clip(f * 255.0, 0, 255).astype(np.uint8)).resize(
+            (240, 240), Image.Resampling.BILINEAR
+        )
+        for f in raw_frames
+    ]
+    buf = io.BytesIO()
+    pil_frames[0].save(
+        buf,
+        format="GIF",
+        save_all=True,
+        append_images=pil_frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-# ---------------------------------------------------------------------------
-# Visual Overlay Generation
-# ---------------------------------------------------------------------------
 def _render_gradcam_gif(
     raw_frames: np.ndarray,
     heatmap_3d: np.ndarray,
     alpha: float = 0.5,
-    duration_ms: int = 60,
+    duration_ms: int = 55,
 ) -> str:
     T, H, W, _ = raw_frames.shape
     jet_map = cm.get_cmap("jet")
@@ -103,190 +110,206 @@ def _render_gradcam_gif(
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _render_raw_gif(raw_frames: np.ndarray, duration_ms: int = 60) -> str:
-    pil_frames = [
-        Image.fromarray(np.clip(f * 255.0, 0, 255).astype(np.uint8)).resize(
-            (240, 240), Image.Resampling.BILINEAR
-        )
-        for f in raw_frames
-    ]
-    buf = io.BytesIO()
-    pil_frames[0].save(
-        buf,
-        format="GIF",
-        save_all=True,
-        append_images=pil_frames[1:],
-        duration=duration_ms,
-        loop=0,
-    )
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
 # ---------------------------------------------------------------------------
-# Ultra-Modern Simplistic HTML/CSS/JS Interface
+# Minimalist HTML/CSS/JS Interface
 # ---------------------------------------------------------------------------
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Echocardiography AI | Automated LVEF & 3D Explainability</title>
+<title>CardioAI · Left Ventricular Systolic Assessment</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  :root {{
-    --bg-base: #06080d;
-    --bg-surface: #0e121a;
-    --bg-subtle: #141a24;
+  :root {
+    --bg-base: #07090e;
+    --bg-card: #0e1219;
+    --bg-elevated: #141a24;
     --border: rgba(255, 255, 255, 0.08);
-    --border-hover: rgba(255, 255, 255, 0.16);
+    --border-strong: rgba(255, 255, 255, 0.16);
     --text-primary: #f8fafc;
     --text-secondary: #94a3b8;
     --text-muted: #64748b;
     --accent: #3b82f6;
     --accent-glow: rgba(59, 130, 246, 0.25);
     --emerald: #10b981;
-    --emerald-glow: rgba(16, 185, 129, 0.2);
-    --crimson: #f43f5e;
+    --emerald-bg: rgba(16, 185, 129, 0.12);
     --amber: #f59e0b;
+    --amber-bg: rgba(245, 158, 11, 0.12);
+    --orange: #f97316;
+    --orange-bg: rgba(249, 115, 22, 0.12);
+    --crimson: #ef4444;
+    --crimson-bg: rgba(239, 68, 68, 0.12);
     --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 16px;
-  }}
+  }
 
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
     background-color: var(--bg-base);
     color: var(--text-primary);
     font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-    overflow-x: hidden;
-  }}
+    align-items: center;
+    padding-bottom: 40px;
+  }
 
-  /* Minimal Top Navbar */
-  .navbar {{
+  /* Minimal Header */
+  .header {
+    width: 100%;
+    max-width: 900px;
+    padding: 24px 20px 16px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 16px 36px;
-    background: rgba(14, 18, 26, 0.8);
-    backdrop-filter: blur(16px);
     border-bottom: 1px solid var(--border);
-    position: sticky;
-    top: 0;
-    z-index: 50;
-  }}
-  .nav-brand {{
+  }
+  .brand {
     display: flex;
     align-items: center;
     gap: 12px;
-  }}
-  .nav-logo {{
-    width: 28px;
-    height: 28px;
-    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  }
+  .brand-icon {
+    width: 32px;
+    height: 32px;
+    background: linear-gradient(135deg, #3b82f6, #6366f1);
     border-radius: 8px;
     display: grid;
     place-items: center;
+    font-size: 15px;
     font-weight: 800;
-    font-size: 14px;
     color: #fff;
     box-shadow: 0 0 16px var(--accent-glow);
-  }}
-  .nav-title {{ font-size: 15px; font-weight: 700; letter-spacing: -0.3px; }}
-  .nav-subtitle {{ font-size: 12px; color: var(--text-muted); font-weight: 500; }}
-  .nav-metrics-pill {{
+  }
+  .brand-title { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+  .brand-tag { font-size: 11px; color: var(--text-muted); font-weight: 500; }
+  .status-badge {
     display: flex;
     align-items: center;
-    gap: 16px;
-    background: var(--bg-subtle);
-    border: 1px solid var(--border);
-    padding: 6px 16px;
+    gap: 8px;
+    padding: 6px 14px;
     border-radius: 9999px;
-    font-size: 12px;
-    font-family: 'JetBrains Mono', monospace;
-  }}
-  .metric-stat {{ color: var(--emerald); font-weight: 600; }}
-
-  /* Main Stage Container */
-  .main-stage {{
-    max-width: 1360px;
-    width: 100%;
-    margin: 28px auto;
-    padding: 0 28px;
-    display: grid;
-    grid-template-columns: 440px 1fr;
-    gap: 28px;
-    flex: 1;
-  }}
-  @media (max-width: 1024px) {{
-    .main-stage {{ grid-template-columns: 1fr; padding: 0 16px; }}
-  }}
-
-  /* Cards */
-  .panel {{
-    background: var(--bg-surface);
+    background: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 24px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--emerald);
+    box-shadow: 0 0 8px var(--emerald);
+  }
+
+  /* Main Container */
+  .container {
+    width: 100%;
+    max-width: 900px;
+    padding: 24px 20px;
     display: flex;
     flex-direction: column;
     gap: 20px;
-    position: relative;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  }}
+  }
 
-  .panel-header {{
+  /* Segmented Mode Control */
+  .segmented-switch {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }}
-  .panel-title {{
-    font-size: 13px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 4px;
+    gap: 4px;
+  }
+  .segment-btn {
+    flex: 1;
+    background: transparent;
+    border: none;
     color: var(--text-secondary);
-  }}
+    padding: 10px 16px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: all 0.2s ease;
+  }
+  .segment-btn.active {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+  .segment-btn:hover:not(.active) { color: var(--text-primary); }
 
-  /* Dropzone */
-  .dropzone {{
+  /* Card Surfaces */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  }
+
+  /* Mode 1: Upload Dropzone */
+  .dropzone {
     border: 1.5px dashed var(--border);
     border-radius: var(--radius-md);
-    padding: 32px 20px;
+    padding: 44px 20px;
     text-align: center;
-    background: rgba(20, 26, 36, 0.4);
+    background: rgba(20, 26, 36, 0.3);
     cursor: pointer;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  }}
-  .dropzone:hover {{
+    transition: all 0.2s ease;
+  }
+  .dropzone:hover {
     border-color: var(--accent);
     background: rgba(59, 130, 246, 0.04);
-    box-shadow: 0 0 24px var(--accent-glow);
-  }}
-  .dropzone-icon {{
-    font-size: 28px;
-    margin-bottom: 8px;
-    opacity: 0.8;
-  }}
-  .dropzone-text {{ font-size: 13px; font-weight: 600; color: var(--text-primary); }}
-  .dropzone-hint {{ font-size: 11px; color: var(--text-muted); margin-top: 4px; }}
-
-  /* Sample Quick Select */
-  .sample-row {{
-    display: flex;
+  }
+  .dropzone input { display: none; }
+  .dropzone-icon { font-size: 32px; margin-bottom: 10px; }
+  .dropzone-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+  .dropzone-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+  .file-ready-bar {
+    display: none;
     align-items: center;
     justify-content: space-between;
-    background: var(--bg-subtle);
+    background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    padding: 10px 14px;
+    padding: 12px 16px;
+    margin-top: 14px;
+    font-size: 13px;
+  }
+  .file-ready-name { color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+
+  /* Mode 2: Random Video Stage */
+  .random-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .random-meta-bar {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
     font-size: 12px;
-  }}
-  .btn-sample {{
+  }
+  .btn-rerandom {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid var(--border);
     color: var(--text-primary);
@@ -296,508 +319,624 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s ease;
-  }}
-  .btn-sample:hover {{ background: rgba(255, 255, 255, 0.12); border-color: var(--border-hover); }}
+  }
+  .btn-rerandom:hover { background: rgba(255, 255, 255, 0.12); }
 
-  /* Degradation selector */
-  .selector-group label {{
-    display: block;
-    font-size: 11px;
+  .cineloop-viewport {
+    width: 240px;
+    height: 240px;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    position: relative;
+    display: grid;
+    place-items: center;
+  }
+  .cineloop-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .cineloop-tag {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-secondary);
+    font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-  }}
-  .custom-select {{
-    width: 100%;
-    background: var(--bg-subtle);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    padding: 10px 14px;
-    font-size: 13px;
-    font-weight: 500;
-    outline: none;
-    cursor: pointer;
-  }}
-  .custom-select:focus {{ border-color: var(--accent); }}
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace;
+  }
 
-  /* Buttons */
-  .action-grid {{ display: flex; gap: 12px; }}
-  .btn-primary {{
-    flex: 1;
+  /* Primary Action Button */
+  .btn-analyze {
+    width: 100%;
     background: var(--accent);
     color: #fff;
     border: none;
     border-radius: var(--radius-sm);
-    padding: 13px 18px;
-    font-size: 13px;
+    padding: 14px 20px;
+    font-size: 14px;
     font-weight: 700;
+    letter-spacing: -0.2px;
     cursor: pointer;
     transition: all 0.2s ease;
     box-shadow: 0 4px 16px var(--accent-glow);
-  }}
-  .btn-primary:hover {{ background: #2563eb; transform: translateY(-1px); }}
-  .btn-primary:disabled {{ background: #1e293b; color: #475569; cursor: not-allowed; box-shadow: none; transform: none; }}
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 16px;
+  }
+  .btn-analyze:hover:not(:disabled) { background: #2563eb; transform: translateY(-1px); }
+  .btn-analyze:disabled {
+    background: #1e293b;
+    color: #475569;
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+  }
 
-  .btn-secondary {{
-    flex: 1;
-    background: #059669;
-    color: #fff;
-    border: none;
-    border-radius: var(--radius-sm);
-    padding: 13px 18px;
-    font-size: 13px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    box-shadow: 0 4px 16px var(--emerald-glow);
-  }}
-  .btn-secondary:hover {{ background: #047857; transform: translateY(-1px); }}
-  .btn-secondary:disabled {{ background: #1e293b; color: #475569; cursor: not-allowed; box-shadow: none; transform: none; }}
+  /* Output Results Card */
+  .results-card {
+    display: none;
+    flex-direction: column;
+    gap: 20px;
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
-  /* Right Viewport (Results & XAI) */
-  .hero-metric-box {{
+  .results-hero {
     display: flex;
     justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid var(--border);
     padding-bottom: 20px;
-  }}
-  .hero-ef-number {{
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-  }}
-  .ef-huge {{
-    font-size: 68px;
+  }
+  .ef-display { display: flex; align-items: baseline; gap: 8px; }
+  .ef-number {
+    font-size: 64px;
     font-weight: 800;
-    letter-spacing: -2px;
     line-height: 1;
+    letter-spacing: -2px;
     color: #fff;
-  }}
-  .ef-pct {{ font-size: 26px; font-weight: 600; color: var(--text-muted); }}
-  .ef-tag {{
-    display: inline-flex;
+  }
+  .ef-unit { font-size: 26px; font-weight: 600; color: var(--text-muted); }
+  .ef-sublabel { font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; letter-spacing: 0.8px; margin-top: 4px; }
+
+  .risk-badge {
+    padding: 8px 18px;
+    border-radius: 9999px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    border: 1px solid;
+    display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 14px;
-    border-radius: 9999px;
-    font-size: 12px;
-    font-weight: 700;
-    border: 1px solid;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }}
+  }
 
-  /* Video Dual Player */
-  .viewport-row {{
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 20px;
-  }}
-  @media (max-width: 768px) {{ .viewport-row {{ grid-template-columns: 1fr; }} }}
-
-  .video-container {{
-    background: #020408;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    overflow: hidden;
+  /* Risk Spectrum Bar */
+  .risk-meter {
     display: flex;
     flex-direction: column;
-    align-items: center;
-  }}
-  .video-canvas {{
+    gap: 6px;
+  }
+  .meter-bar {
     width: 100%;
-    aspect-ratio: 1;
-    object-fit: cover;
-    display: block;
-    background: #000;
-  }}
-  .video-caption {{
-    width: 100%;
-    padding: 8px 12px;
-    background: rgba(14, 18, 26, 0.9);
-    border-top: 1px solid var(--border);
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-secondary);
+    height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #ef4444 0%, #ef4444 30%, #f97316 30%, #f97316 40%, #f59e0b 40%, #f59e0b 50%, #10b981 50%, #10b981 100%);
+    position: relative;
+  }
+  .meter-pin {
+    position: absolute;
+    top: -4px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid #000;
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.8);
+    transform: translateX(-50%);
+    transition: left 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .meter-labels {
     display: flex;
     justify-content: space-between;
-  }}
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
 
-  /* Diagnostic Narrative */
-  .report-surface {{
-    background: var(--bg-subtle);
+  /* Diagnostic Summary Box */
+  .diag-box {
+    background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
-    padding: 20px;
-  }}
-  .report-heading {{
+    padding: 18px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: #cbd5e1;
+  }
+  .diag-title {
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.6px;
     color: var(--accent);
-    margin-bottom: 8px;
-  }}
-  .report-text {{
-    font-size: 13.5px;
-    line-height: 1.65;
-    color: #cbd5e1;
-  }}
+    margin-bottom: 6px;
+  }
 
-  .alert-card {{
-    background: rgba(244, 63, 94, 0.1);
-    border: 1px solid rgba(244, 63, 94, 0.3);
+  .alert-banner {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
     border-left: 4px solid var(--crimson);
+    border-radius: var(--radius-sm);
     padding: 12px 16px;
-    border-radius: 6px;
     font-size: 12.5px;
-    color: #fecdd3;
-    margin-top: 12px;
+    color: #fecaca;
     line-height: 1.5;
-  }}
+  }
 
-  /* Download Toolbar */
-  .download-toolbar {{
-    display: flex;
-    gap: 10px;
-    margin-top: 4px;
-  }}
-  .btn-download {{
+  /* Expandable Explainability */
+  .xai-section {
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+  .btn-toggle-xai {
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text-secondary);
     padding: 8px 14px;
-    border-radius: 6px;
-    font-size: 11px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
     font-weight: 600;
     cursor: pointer;
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     transition: all 0.15s ease;
-  }}
-  .btn-download:hover {{
-    color: #fff;
-    border-color: var(--border-hover);
-    background: rgba(255, 255, 255, 0.04);
-  }}
+  }
+  .btn-toggle-xai:hover { border-color: var(--border-strong); color: var(--text-primary); }
 
-  /* Footer Status */
-  .footer-status {{
-    padding: 14px 36px;
-    background: var(--bg-surface);
+  .xai-viewer {
+    display: none;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-top: 14px;
+  }
+  @media (max-width: 600px) { .xai-viewer { grid-template-columns: 1fr; } }
+
+  .xai-pane {
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    text-align: center;
+  }
+  .xai-pane img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+  .xai-pane-lbl {
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    background: rgba(14, 18, 25, 0.8);
     border-top: 1px solid var(--border);
+  }
+
+  /* Actions Toolbar */
+  .toolbar {
     display: flex;
     justify-content: space-between;
-    font-size: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .tool-group { display: flex; gap: 8px; }
+  .btn-tool {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 8px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-tool:hover { background: rgba(255, 255, 255, 0.04); color: var(--text-primary); border-color: var(--border-strong); }
+  .btn-reset {
+    background: transparent;
+    border: 1px solid var(--border);
     color: var(--text-muted);
-  }}
+    padding: 8px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-reset:hover { color: var(--crimson); border-color: var(--crimson); }
 </style>
 </head>
 <body>
 
-<!-- Navbar -->
-<nav class="navbar">
-  <div class="nav-brand">
-    <div class="nav-logo">LV</div>
+<!-- Header -->
+<header class="header">
+  <div class="brand">
+    <div class="brand-icon">🫀</div>
     <div>
-      <div class="nav-title">EchoNet LVEF Intelligence Suite</div>
-      <div class="nav-subtitle">CMR College of Engineering & Technology · Major Project Batch 92</div>
+      <div class="brand-title">CardioAI</div>
+      <div class="brand-tag">Left Ventricular Systolic Assessment</div>
     </div>
   </div>
-  <div class="nav-metrics-pill">
-    <span>MAE: <span class="metric-stat">__MAE__</span></span>
-    <span>RMSE: <span class="metric-stat">__RMSE__</span></span>
-    <span>Pearson r: <span class="metric-stat">__R__</span></span>
-    <span style="color:#10b981;">● Nature 2020 Beaten</span>
+  <div class="status-badge">
+    <span class="status-dot"></span>
+    <span>R(2+1)D-18 Baseline · Active</span>
   </div>
-</nav>
+</header>
 
-<!-- Main Stage -->
-<main class="main-stage">
+<!-- Main Container -->
+<main class="container">
 
-  <!-- Left: Inputs & Stress Testing -->
-  <section class="panel">
-    <div class="panel-header">
-      <span class="panel-title">1. Cineloop Input</span>
-      <span id="systemStatus" style="font-size:11px; color:var(--emerald); font-weight:600;">System Ready</span>
+  <!-- Segmented Mode Control -->
+  <div class="segmented-switch">
+    <button class="segment-btn active" id="tabUpload" onclick="switchMode('upload')">
+      📤 Upload Cineloop
+    </button>
+    <button class="segment-btn" id="tabRandom" onclick="switchMode('random')">
+      🎲 Select Random Sample
+    </button>
+  </div>
+
+  <!-- Input Card -->
+  <section class="card" id="inputCard">
+
+    <!-- Mode 1: Upload View -->
+    <div id="uploadView">
+      <div class="dropzone" onclick="document.getElementById('fileInput').click()">
+        <input type="file" id="fileInput" accept=".mp4,.avi,.npy" onchange="handleFile(event)">
+        <div class="dropzone-icon">📁</div>
+        <div class="dropzone-title">Drop Echocardiography Cineloop Here</div>
+        <div class="dropzone-sub">Supports MP4, AVI, or NPY format</div>
+      </div>
+      <div class="file-ready-bar" id="fileReadyBar">
+        <div>
+          <span style="color:var(--text-muted); font-size:11px;">READY:</span>
+          <span class="file-ready-name" id="fileReadyName">--</span>
+        </div>
+        <span style="color:var(--emerald); font-size:12px; font-weight:600;">✓ Buffered</span>
+      </div>
     </div>
 
-    <!-- Dropzone -->
-    <div class="dropzone" onclick="document.getElementById('fileInput').click()">
-      <input type="file" id="fileInput" accept=".mp4,.avi,.npy" onchange="handleFileUpload(event)">
-      <div class="dropzone-icon">🫀</div>
-      <div class="dropzone-text" id="dropzoneText">Drop A4C Video or Click to Browse</div>
-      <div class="dropzone-hint">Supports MP4, AVI, or NPY (112×112 Stanford format)</div>
+    <!-- Mode 2: Select Random View -->
+    <div id="randomView" style="display:none;" class="random-stage">
+      <div class="random-meta-bar">
+        <span>Selected Sample: <code id="randomSampleName" style="color:var(--accent);">--</code></span>
+        <button class="btn-sample" onclick="fetchRandomSample()">Pick Another</button>
+      </div>
+      <!-- Video sample IS shown in Select Random mode -->
+      <div class="cineloop-viewport">
+        <img id="randomCineloopImg" class="cineloop-img" alt="Test Cineloop">
+        <div class="cineloop-tag">Raw A4C Cineloop</div>
+      </div>
     </div>
 
-    <!-- Quick Sample Loader -->
-    <div class="sample-row">
-      <span style="color:var(--text-secondary); font-size:12px;">Pre-loaded Test Case: <code>0X10094BA0A028EAC3</code></span>
-      <button class="btn-sample" onclick="loadSampleVideo()">Load Sample</button>
-    </div>
-
-    <!-- Acoustic Degradation -->
-    <div class="selector-group">
-      <label>Ultrasound Stress Simulation (Objective 1)</label>
-      <select id="degradeMode" class="custom-select">
-        <option value="none">Clean Cineloop (Uncorrupted Baseline)</option>
-        <option value="speckle">Multiplicative Speckle Noise (eta ~ N(0, 0.25²))</option>
-        <option value="shadow">Sector Acoustic Shadowing (75% Cone Attenuation)</option>
-        <option value="drop">Wireless Frame Dropout (25% Temporal Loss)</option>
-        <option value="compound">Compound Bedside POCUS Stress (Severe Artifacts)</option>
-      </select>
-    </div>
-
-    <!-- Actions -->
-    <div class="action-grid">
-      <button class="btn-primary" id="btnPredict" onclick="runInference(false)" disabled>
-        Estimate LVEF
-      </button>
-      <button class="btn-secondary" id="btnXAI" onclick="runInference(true)" disabled>
-        3D Grad-CAM
-      </button>
-    </div>
+    <!-- Action Button -->
+    <button class="btn-analyze" id="btnAnalyze" onclick="executeAnalysis()" disabled>
+      Analyze Ventricular Function
+    </button>
   </section>
 
-  <!-- Right: Viewport & Decision Support -->
-  <section class="panel">
-    <div class="panel-header">
-      <span class="panel-title">2. Clinical Decision Support & Explainability</span>
-      <span id="analysisState" style="font-size:12px; color:var(--text-muted);">Awaiting Analysis</span>
-    </div>
-
-    <!-- Hero EF Scoreboard -->
-    <div class="hero-metric-box">
-      <div class="hero-ef-number">
-        <span class="ef-huge" id="efValue">--</span>
-        <span class="ef-pct">%</span>
-      </div>
-      <div id="efBadge" class="ef-tag" style="background:rgba(255,255,255,0.05); color:var(--text-muted); border-color:var(--border);">
-        Pending Analysis
-      </div>
-    </div>
-
-    <!-- Dual Video Viewport (Raw vs Grad-CAM) -->
-    <div class="viewport-row" id="viewportRow" style="display:none;">
-      <div class="video-container">
-        <img id="rawVideo" class="video-canvas" alt="Raw Video">
-        <div class="video-caption">
-          <span>Raw Cineloop</span>
-          <span style="color:var(--text-muted);">32 Frames · 50 FPS</span>
+  <!-- Results Output Card -->
+  <section class="card results-card" id="resultsCard">
+    <div class="results-hero">
+      <div>
+        <div class="ef-sublabel">Left Ventricular Ejection Fraction</div>
+        <div class="ef-display">
+          <span class="ef-number" id="outEF">--</span>
+          <span class="ef-unit">%</span>
         </div>
       </div>
-      <div class="video-container" id="xaiContainer" style="display:none;">
-        <img id="xaiVideo" class="video-canvas" alt="3D Grad-CAM">
-        <div class="video-caption">
-          <span style="color:var(--emerald);">3D Grad-CAM Attention</span>
-          <span style="color:var(--emerald);">Layer4 Conv Saliency</span>
+      <div class="risk-badge" id="outRiskBadge">
+        --
+      </div>
+    </div>
+
+    <!-- Visual Risk Gauge -->
+    <div class="risk-meter">
+      <div class="meter-bar">
+        <div class="meter-pin" id="meterPin" style="left:50%;"></div>
+      </div>
+      <div class="meter-labels">
+        <span>Severe &lt;30%</span>
+        <span>Moderate 30-40%</span>
+        <span>Mild 41-49%</span>
+        <span>Normal &ge;50%</span>
+      </div>
+    </div>
+
+    <!-- Action Alert (if any) -->
+    <div id="alertWrapper"></div>
+
+    <!-- Diagnostic Narrative -->
+    <div class="diag-box">
+      <div class="diag-title">ASE / EACVI Diagnostic Classification</div>
+      <p id="outNarrative">--</p>
+    </div>
+
+    <!-- Expandable 3D Grad-CAM Explainability -->
+    <div class="xai-section">
+      <button class="btn-toggle-xai" id="btnToggleXai" onclick="toggleXAI()">
+        <span>👁️ View 3D Spatiotemporal Attention (Grad-CAM)</span>
+      </button>
+
+      <div class="xai-viewer" id="xaiViewer">
+        <div class="xai-pane">
+          <img id="xaiRawImg" alt="Raw Video">
+          <div class="xai-pane-lbl">Echocardiogram Cineloop</div>
+        </div>
+        <div class="xai-pane">
+          <img id="xaiGradCamImg" alt="3D Attention">
+          <div class="xai-pane-lbl" style="color:var(--emerald);">3D Grad-CAM Saliency</div>
         </div>
       </div>
     </div>
 
-    <!-- Clinical Report Narrative -->
-    <div class="report-surface">
-      <div class="report-heading">Automated Clinical Diagnostic Report (ASE Guidelines)</div>
-      <p class="report-text" id="reportNarrative">
-        Upload or load an apical 4-chamber echocardiography video and select 'Estimate LVEF' or '3D Grad-CAM' to generate diagnostic findings.
-      </p>
-      <div id="alertContainer"></div>
-    </div>
-
-    <!-- Downloadable Toolbar -->
-    <div class="download-toolbar" id="downloadBar" style="display:none;">
-      <button class="btn-download" onclick="downloadReportJSON()">📥 Download Report (JSON)</button>
-      <button class="btn-download" onclick="downloadReportText()">📄 Download Report (TXT)</button>
-      <button class="btn-download" id="btnDownloadGIF" onclick="downloadXaiGIF()" style="display:none;">🎞️ Download Grad-CAM GIF</button>
+    <!-- Action Toolbar -->
+    <div class="toolbar">
+      <div class="tool-group">
+        <button class="btn-tool" onclick="copyReport()">📋 Copy Report</button>
+        <button class="btn-tool" onclick="downloadJSON()">📥 Download JSON</button>
+        <button class="btn-tool" onclick="downloadTXT()">📄 Download TXT</button>
+      </div>
+      <button class="btn-reset" onclick="resetUI()">🔄 Analyze Another Video</button>
     </div>
   </section>
 
 </main>
 
-<!-- Footer -->
-<footer class="footer-status">
-  <div>Stanford EchoNet-Dynamic Benchmark Reproduction · R(2+1)D-18 Spatiotemporal CNN</div>
-  <div>Validation Cohort: N = 1,288 · Best MAE = 4.07% · R² = 0.801 · p &lt; 0.0001</div>
-</footer>
-
 <script>
-  let currentFile = null;
-  let activeReport = null;
-  let activeXaiGif = null;
+  let activeMode = 'upload';
+  let selectedFile = null;
+  let activePayload = null;
+  let isXaiOpen = false;
 
-  function loadSampleVideo() {
-    currentFile = "0X10094BA0A028EAC3.mp4";
-    document.getElementById('dropzoneText').innerText = "Loaded: 0X10094BA0A028EAC3.mp4";
-    document.getElementById('btnPredict').disabled = false;
-    document.getElementById('btnXAI').disabled = false;
-    document.getElementById('systemStatus').innerText = "Sample Loaded";
+  function switchMode(mode) {
+    activeMode = mode;
+    document.getElementById('tabUpload').classList.toggle('active', mode === 'upload');
+    document.getElementById('tabRandom').classList.toggle('active', mode === 'random');
+    document.getElementById('uploadView').style.display = mode === 'upload' ? 'block' : 'none';
+    document.getElementById('randomView').style.display = mode === 'random' ? 'flex' : 'none';
 
-    // Request preview
-    fetch('/api/preview_sample')
+    if (mode === 'random') {
+      fetchRandomSample();
+    } else {
+      document.getElementById('btnAnalyze').disabled = !selectedFile;
+    }
+  }
+
+  function fetchRandomSample() {
+    const statusBtn = document.getElementById('btnAnalyze');
+    statusBtn.disabled = true;
+    document.getElementById('randomSampleName').innerText = "Loading sample...";
+
+    fetch('/api/random_sample')
       .then(r => r.json())
       .then(d => {
+        if (d.error) throw new Error(d.error);
+        selectedFile = d.filename;
+        document.getElementById('randomSampleName').innerText = d.filename;
         if (d.gif) {
-          document.getElementById('rawVideo').src = "data:image/gif;base64," + d.gif;
-          document.getElementById('viewportRow').style.display = "grid";
+          document.getElementById('randomCineloopImg').src = "data:image/gif;base64," + d.gif;
         }
+        statusBtn.disabled = false;
+      })
+      .catch(e => {
+        document.getElementById('randomSampleName').innerText = "Error loading sample";
       });
   }
 
-  function handleFileUpload(event) {
+  function handleFile(event) {
     const file = event.target.files[0];
     if (!file) return;
-    currentFile = file.name;
-    document.getElementById('dropzoneText').innerText = "Uploading: " + file.name;
-    document.getElementById('systemStatus').innerText = "Uploading...";
+
+    selectedFile = file.name;
+    document.getElementById('fileReadyName').innerText = file.name;
+    document.getElementById('fileReadyBar').style.display = 'flex';
+    document.getElementById('btnAnalyze').disabled = true;
 
     const fd = new FormData();
     fd.append('video', file);
 
     fetch('/api/upload', { method: 'POST', body: fd })
       .then(r => r.json())
-      .then(data => {
-        document.getElementById('dropzoneText').innerText = "Ready: " + file.name;
-        document.getElementById('systemStatus').innerText = "Cineloop Buffered";
-        document.getElementById('btnPredict').disabled = false;
-        document.getElementById('btnXAI').disabled = false;
-        if (data.preview_gif) {
-          document.getElementById('rawVideo').src = "data:image/gif;base64," + data.preview_gif;
-          document.getElementById('viewportRow').style.display = "grid";
-        }
+      .then(d => {
+        if (d.error) throw new Error(d.error);
+        document.getElementById('btnAnalyze').disabled = false;
       })
-      .catch(() => {
-        document.getElementById('systemStatus').innerText = "Upload Error";
+      .catch(e => {
+        alert("Upload error: " + e.message);
       });
   }
 
-  async function runInference(withXAI) {
-    const status = document.getElementById('analysisState');
-    status.innerText = withXAI ? "Computing 3D Grad-CAM Gradients..." : "Estimating Continuous LVEF...";
-    status.style.color = "#f59e0b";
-    document.getElementById('btnPredict').disabled = true;
-    document.getElementById('btnXAI').disabled = true;
-
-    const degrade = document.getElementById('degradeMode').value;
-    const endpoint = withXAI ? '/api/explain' : '/api/predict';
+  async function executeAnalysis() {
+    const btn = document.getElementById('btnAnalyze');
+    btn.disabled = true;
+    btn.innerText = "Processing 32 spatiotemporal frames...";
 
     try {
-      const res = await fetch(endpoint, {
+      const res = await fetch('/api/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: currentFile, degradation: degrade })
+        body: JSON.stringify({ filename: selectedFile })
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
-      activeReport = data;
-
-      // Update EF
-      document.getElementById('efValue').innerText = data.predicted_lvef.toFixed(1);
-      const badge = document.getElementById('efBadge');
-      badge.innerText = data.clinical_category;
-      badge.style.color = data.badge_color;
-      badge.style.borderColor = data.badge_color;
-      badge.style.background = data.badge_color + "18";
-
-      // Report narrative
-      document.getElementById('reportNarrative').innerText = data.summary;
-
-      // Alerts
-      const alertBox = document.getElementById('alertContainer');
-      alertBox.innerHTML = '';
-      if (data.report && data.report.clinical_alerts) {
-        data.report.clinical_alerts.forEach(txt => {
-          const alert = document.createElement('div');
-          alert.className = 'alert-card';
-          alert.innerText = "⚠️ " + txt;
-          alertBox.appendChild(alert);
-        });
-      }
-
-      // XAI GIF
-      if (data.xai_gif) {
-        activeXaiGif = data.xai_gif;
-        const xaiImg = document.getElementById('xaiVideo');
-        xaiImg.src = "data:image/gif;base64," + data.xai_gif;
-        document.getElementById('xaiContainer').style.display = "flex";
-        document.getElementById('viewportRow').style.display = "grid";
-        document.getElementById('btnDownloadGIF').style.display = "inline-flex";
-      }
-
-      document.getElementById('downloadBar').style.display = "flex";
-      status.innerText = "Evaluation Complete";
-      status.style.color = "#10b981";
+      activePayload = data;
+      renderResults(data);
     } catch (e) {
-      status.innerText = "Execution Error: " + e.message;
-      status.style.color = "#f43f5e";
+      alert("Analysis error: " + e.message);
     } finally {
-      document.getElementById('btnPredict').disabled = false;
-      document.getElementById('btnXAI').disabled = false;
+      btn.disabled = false;
+      btn.innerText = "Analyze Ventricular Function";
     }
   }
 
-  function downloadReportJSON() {
-    if (!activeReport) return;
-    const blob = new Blob([JSON.stringify(activeReport, null, 2)], { type: 'application/json' });
+  function renderResults(data) {
+    const card = document.getElementById('resultsCard');
+    card.style.display = 'flex';
+
+    // 1. LVEF Number
+    document.getElementById('outEF').innerText = data.predicted_lvef.toFixed(1);
+
+    // 2. Heart Risk Badge & Colors
+    const riskBadge = document.getElementById('outRiskBadge');
+    const riskLevel = data.heart_risk_level || "Undetermined";
+    riskBadge.innerText = riskLevel;
+    riskBadge.style.color = data.badge_color;
+    riskBadge.style.borderColor = data.badge_color;
+    riskBadge.style.background = data.badge_color + "18";
+
+    // 3. Risk Meter Pin Position: map LVEF [10, 75] to [0%, 100%]
+    const clampedForMeter = Math.max(10, Math.min(75, data.predicted_lvef));
+    const meterPct = ((clampedForMeter - 10) / (75 - 10)) * 100;
+    document.getElementById('meterPin').style.left = meterPct.toFixed(1) + "%";
+
+    // 4. Clinical Narrative
+    document.getElementById('outNarrative').innerText = data.summary;
+
+    // 5. Action Alert
+    const alertWrapper = document.getElementById('alertWrapper');
+    alertWrapper.innerHTML = '';
+    if (data.report && data.report.clinical_alerts) {
+      data.report.clinical_alerts.forEach(txt => {
+        const div = document.createElement('div');
+        div.className = 'alert-banner';
+        div.innerText = "⚠️ " + txt;
+        alertWrapper.appendChild(div);
+      });
+    }
+
+    // Scroll to results smoothly
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  async function toggleXAI() {
+    const viewer = document.getElementById('xaiViewer');
+    const btn = document.getElementById('btnToggleXai');
+
+    if (isXaiOpen) {
+      viewer.style.display = 'none';
+      btn.innerText = "👁️ View 3D Spatiotemporal Attention (Grad-CAM)";
+      isXaiOpen = false;
+      return;
+    }
+
+    btn.innerText = "Computing 3D Saliency Heatmap...";
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/api/explain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: selectedFile })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      if (data.xai_gif) {
+        document.getElementById('xaiGradCamImg').src = "data:image/gif;base64," + data.xai_gif;
+      }
+      if (data.raw_gif) {
+        document.getElementById('xaiRawImg').src = "data:image/gif;base64," + data.raw_gif;
+      }
+
+      viewer.style.display = 'grid';
+      btn.innerText = "Hide 3D Attention Heatmap";
+      isXaiOpen = true;
+    } catch(e) {
+      alert("Explainability error: " + e.message);
+      btn.innerText = "👁️ View 3D Spatiotemporal Attention (Grad-CAM)";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function resetUI() {
+    document.getElementById('resultsCard').style.display = 'none';
+    document.getElementById('xaiViewer').style.display = 'none';
+    isXaiOpen = false;
+    document.getElementById('btnToggleXai').innerText = "👁️ View 3D Spatiotemporal Attention (Grad-CAM)";
+    selectedFile = null;
+    activePayload = null;
+    document.getElementById('fileInput').value = '';
+    document.getElementById('fileReadyBar').style.display = 'none';
+    document.getElementById('btnAnalyze').disabled = true;
+
+    if (activeMode === 'random') {
+      fetchRandomSample();
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function copyReport() {
+    if (!activePayload) return;
+    const txt = `CardioAI Diagnostic Report\nLVEF: ${activePayload.predicted_lvef.toFixed(1)}%\nHeart Risk: ${activePayload.heart_risk_level}\nPhenotype: ${activePayload.clinical_category}\n\n${activePayload.summary}`;
+    navigator.clipboard.writeText(txt).then(() => {
+      alert("Report copied to clipboard.");
+    });
+  }
+
+  function downloadJSON() {
+    if (!activePayload) return;
+    const blob = new Blob([JSON.stringify(activePayload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `LVEF_Report_${currentFile || 'Patient'}.json`;
+    a.download = `LVEF_Report_${selectedFile || 'Sample'}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
-  function downloadReportText() {
-    if (!activeReport) return;
-    const txt = activeReport.summary + (activeReport.report && activeReport.report.clinical_alerts ? "\n\nAlerts:\n- " + activeReport.report.clinical_alerts.join("\n- ") : "");
+  function downloadTXT() {
+    if (!activePayload) return;
+    const txt = `CardioAI Diagnostic Report\nPatient / File: ${selectedFile}\nEstimated LVEF: ${activePayload.predicted_lvef.toFixed(1)}%\nHeart Risk: ${activePayload.heart_risk_level}\nClassification: ${activePayload.ase_classification} (${activePayload.clinical_category})\n\nClinical Summary:\n${activePayload.summary}\n`;
     const blob = new Blob([txt], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `LVEF_Report_${currentFile || 'Patient'}.txt`;
+    a.download = `LVEF_Report_${selectedFile || 'Sample'}.txt`;
     a.click();
     URL.revokeObjectURL(url);
-  }
-
-  function downloadXaiGIF() {
-    if (!activeXaiGif) return;
-    const a = document.createElement('a');
-    a.href = "data:image/gif;base64," + activeXaiGif;
-    a.download = `GradCAM_3D_${currentFile || 'Video'}.gif`;
-    a.click();
   }
 </script>
 </body>
 </html>"""
 
 
-def _build_html() -> str:
-    metrics = _load_metrics()
-    mae_val = f"{metrics.get('mae', 4.07):.2f}%"
-    r_val = f"{metrics.get('pearson_r', 0.896):.3f}"
-    rmse_val = f"{metrics.get('rmse', 5.49):.2f}%"
-    return (
-        _HTML_TEMPLATE.replace("__MAE__", mae_val)
-        .replace("__RMSE__", rmse_val)
-        .replace("__R__", r_val)
-    )
-
-
 # ---------------------------------------------------------------------------
-# Request Handler
+# HTTP Server Handler
 # ---------------------------------------------------------------------------
 _UPLOAD_STORE: dict = {}
 estimator: LVEFEstimator = None
 
 
-class ClinicalWorkstationHandler(BaseHTTPRequestHandler):
+class MinimalClinicalHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, data: dict, status: int = 200) -> None:
         body = json.dumps(data).encode("utf-8")
@@ -810,14 +949,14 @@ class ClinicalWorkstationHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
-            html = _build_html().encode("utf-8")
+            html = _HTML_TEMPLATE.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(html)))
             self.end_headers()
             self.wfile.write(html)
-        elif parsed.path == "/api/preview_sample":
-            self._handle_sample_preview()
+        elif parsed.path == "/api/random_sample":
+            self._handle_random_sample()
         else:
             self.send_response(404)
             self.end_headers()
@@ -834,18 +973,20 @@ class ClinicalWorkstationHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-    def _handle_sample_preview(self) -> None:
-        sample_path = os.path.join(REPO_ROOT, "data", "test_videos", "0X10094BA0A028EAC3.mp4")
-        if not os.path.exists(sample_path):
-            sample_path = os.path.join(REPO_ROOT, "data", "test_videos", "0X10094BA0A028EAC3.npy")
-        if not os.path.exists(sample_path):
-            self._send_json({"error": "Sample video not found"}, 404)
+    def _handle_random_sample(self) -> None:
+        sample_path = get_random_sample_video()
+        if not sample_path or not os.path.exists(sample_path):
+            self._send_json({"error": "No test videos found in data/test_videos/"}, 404)
             return
 
-        clip = load_video_clip(sample_path, start_frame=0, num_frames=16, stride=2, target_size=112)
-        clip_unnorm = np.clip(clip * 0.18 + 0.12, 0.0, 1.0)
-        gif_b64 = _render_raw_gif(clip_unnorm, duration_ms=60)
-        self._send_json({"gif": gif_b64})
+        fname = os.path.basename(sample_path)
+        try:
+            clip = load_video_clip(sample_path, start_frame=0, num_frames=16, stride=2, target_size=112)
+            clip_unnorm = np.clip(clip * 0.18 + 0.12, 0.0, 1.0)
+            gif_b64 = _render_raw_gif(clip_unnorm, duration_ms=55)
+            self._send_json({"filename": fname, "gif": gif_b64})
+        except Exception as exc:
+            self._send_json({"filename": fname, "gif": "", "warning": str(exc)})
 
     def _handle_upload(self) -> None:
         import cgi
@@ -868,72 +1009,37 @@ class ClinicalWorkstationHandler(BaseHTTPRequestHandler):
         fname = os.path.basename(file_item.filename)
         _UPLOAD_STORE[fname] = raw_bytes
 
-        # Render preview GIF
-        preview_gif = ""
-        try:
-            tmp_path = os.path.join(tempfile.gettempdir(), fname)
-            with open(tmp_path, "wb") as f:
-                f.write(raw_bytes)
-            clip = load_video_clip(tmp_path, start_frame=0, num_frames=16, stride=2, target_size=112)
-            clip_unnorm = np.clip(clip * 0.18 + 0.12, 0.0, 1.0)
-            preview_gif = _render_raw_gif(clip_unnorm, duration_ms=60)
-        except Exception:
-            pass
+        # Only return status - no upfront video sample shown for upload mode
+        self._send_json({"status": "ok", "filename": fname})
 
-        self._send_json({"status": "ok", "filename": fname, "preview_gif": preview_gif})
+    def _resolve_video_path(self, fname: str) -> str:
+        # Check in test_videos directory
+        test_dir = os.path.join(REPO_ROOT, "data", "test_videos")
+        candidate = os.path.join(test_dir, fname)
+        if os.path.exists(candidate):
+            return candidate
 
-    def _resolve_target_video(self, fname: str, degradation: str) -> str:
-        # Check if sample video is requested
-        if fname in ("0X10094BA0A028EAC3.mp4", "0X10094BA0A028EAC3"):
-            sample_candidates = [
-                os.path.join(REPO_ROOT, "data", "test_videos", "0X10094BA0A028EAC3.mp4"),
-                os.path.join(REPO_ROOT, "data", "test_videos", "0X10094BA0A028EAC3.npy"),
-            ]
-            for sc in sample_candidates:
-                if os.path.exists(sc):
-                    src_path = sc
-                    break
-            else:
-                raise FileNotFoundError("Sample video not found on disk.")
-        elif fname in _UPLOAD_STORE:
+        stem = os.path.splitext(fname)[0]
+        candidate_npy = os.path.join(test_dir, f"{stem}.npy")
+        if os.path.exists(candidate_npy):
+            return candidate_npy
+
+        # Check in upload store
+        if fname in _UPLOAD_STORE:
             tmp_path = os.path.join(tempfile.gettempdir(), fname)
             with open(tmp_path, "wb") as f:
                 f.write(_UPLOAD_STORE[fname])
-            src_path = tmp_path
-        else:
-            raise FileNotFoundError(f"Video '{fname}' not found in upload store.")
+            return tmp_path
 
-        # Apply degradation if requested
-        if degradation and degradation != "none":
-            degrader = UltrasoundDegradation(seed=42)
-            clip = load_video_clip(src_path, start_frame=0, num_frames=64, stride=1, target_size=112)
-            clip_raw = np.clip(clip * 0.18 + 0.12, 0.0, 1.0)
-
-            if degradation == "speckle":
-                deg = degrader.add_speckle_noise(clip_raw, severity=0.25)
-            elif degradation == "shadow":
-                deg = degrader.apply_acoustic_shadowing(clip_raw, attenuation_factor=0.75)
-            elif degradation == "drop":
-                deg = degrader.apply_frame_dropout(clip_raw, drop_rate=0.25, mode="freeze")
-            elif degradation == "compound":
-                deg = degrader.apply_compound_degradation(clip_raw, severity="moderate")
-            else:
-                deg = clip_raw
-
-            deg_npy = os.path.join(tempfile.gettempdir(), f"{os.path.splitext(fname)[0]}_deg.npy")
-            np.save(deg_npy, (deg * 255.0).astype(np.uint8))
-            return deg_npy
-
-        return src_path
+        raise FileNotFoundError(f"Video file '{fname}' not found.")
 
     def _handle_predict(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length).decode("utf-8"))
         fname = body.get("filename", "")
-        degrade = body.get("degradation", "none")
 
         try:
-            target_path = self._resolve_target_video(fname, degrade)
+            target_path = self._resolve_video_path(fname)
             result = estimator.predict(target_path)
             self._send_json(result)
         except Exception as exc:
@@ -943,29 +1049,30 @@ class ClinicalWorkstationHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length).decode("utf-8"))
         fname = body.get("filename", "")
-        degrade = body.get("degradation", "none")
 
         try:
-            target_path = self._resolve_target_video(fname, degrade)
+            target_path = self._resolve_video_path(fname)
             raw_frames, heatmap_3d, clip_ef = estimator.explain(target_path, start_frame=0)
-            gif_b64 = _render_gradcam_gif(raw_frames, heatmap_3d, alpha=0.5, duration_ms=60)
+            raw_gif = _render_raw_gif(raw_frames, duration_ms=55)
+            xai_gif = _render_gradcam_gif(raw_frames, heatmap_3d, alpha=0.5, duration_ms=55)
 
             report_gen = ClinicalReportGenerator()
             report_dict = report_gen.generate_report(
                 patient_id=fname,
                 predicted_ef=clip_ef,
-                degradation_applied=degrade if degrade != "none" else None,
             )
 
             classification = report_dict["classification"]
             response_data = {
                 "predicted_lvef": round(clip_ef, 1),
+                "heart_risk_level": classification.get("heart_risk_level", "Undetermined"),
                 "clinical_category": classification["phenotype"],
                 "badge_color": classification["badge_color"],
                 "ase_classification": classification["category"],
                 "summary": report_dict["narrative"],
                 "report": report_dict,
-                "xai_gif": gif_b64,
+                "raw_gif": raw_gif,
+                "xai_gif": xai_gif,
             }
             self._send_json(response_data)
         except Exception as exc:
@@ -984,17 +1091,17 @@ def run_server(port: int = 8501, checkpoint_arg: str = "") -> None:
     print(f"[*] Initializing LVEFEstimator from: {checkpoint_path}")
     estimator = LVEFEstimator(checkpoint_path=checkpoint_path)
 
-    server = HTTPServer(("127.0.0.1", port), ClinicalWorkstationHandler)
-    print("=" * 70)
-    print("  ECHONET CLINICAL AI WORKSTATION")
+    server = HTTPServer(("127.0.0.1", port), MinimalClinicalHandler)
+    print("=" * 65)
+    print("  CARDIOAI · MINIMALIST CLINICAL LVEF WORKSTATION")
     print(f"  -> Local Web UI:    http://127.0.0.1:{port}")
     print(f"  -> Checkpoint Path: {checkpoint_path}")
-    print("=" * 70)
+    print("=" * 65)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[app] Shutting down.")
+        print("\n[app] Server shutdown requested.")
         server.server_close()
 
 
